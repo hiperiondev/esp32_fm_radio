@@ -1,4 +1,4 @@
-
+## *Note:* This code is an adaptation of the original code, corrected to compile with ESP-IDF 5.5.1. The routine for calculating base values ​​for the APLL configuration has also been corrected. For the original code reffer to: https://github.com/Alexxdal/ESP32FMRadio
 # ESP32FMRadio: FM Transmission Using APLL andI2S MCLK on ESP32
 
 **ESP32FMRadio** is a project that turns an ESP32 microcontroller into a mini FM radio transmitter by
