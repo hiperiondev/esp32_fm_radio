@@ -56,107 +56,114 @@ static inline uint32_t get_xtal_hz(void) {
  * @param dev_hz Maximum desired frequency deviation in Hz (absolute)
  * @return Populated fm_apll_cfg_t structure
  */
-static fm_apll_cfg_t fm_calc_apll(uint32_t fout_hz, uint32_t dev_hz) {
+static fm_apll_cfg_t fm_calc_apll(uint32_t xtal_hz, uint32_t fout_hz, uint32_t dev_hz) {
     fm_apll_cfg_t best = { 0 };
-    uint64_t XTAL = (uint64_t)get_xtal_hz();
-    if (XTAL == 0) {
-        ESP_LOGI(TAG, "fm_calc_apll_opt: XTAL==0, returning zeroed config");
-        best.is_rev0 = (efuse_ll_get_chip_ver_rev1() == 0);
+    if (xtal_hz == 0)
         return best;
-    }
 
+    const uint64_t XTAL = (uint64_t)xtal_hz;
     const uint64_t VCO_MIN = 350000000ULL;
     const uint64_t VCO_MAX = 500000000ULL;
+    const int NEAR = 8; // widen neighbor search to catch edge cases
 
     bool have_best = false;
-    uint64_t best_err = UINT64_MAX;
+    // Instead of floating Hz, keep a integer numerator error comparator:
+    // We'll compare absolute difference of numerators:
+    // produced_numer = XTAL * ((4+sdm2)*65536 + base_frac16)
+    // target_numer   = fout_hz * (2 * o_mul) * 65536
+    // error_numer = abs(produced_numer - target_numer)
+    uint64_t best_err_numer = 0;
 
-    bool prefer_inrange = true;
-    fm_apll_cfg_t best_inrange = { 0 };
-    bool have_inrange = false;
-    uint64_t best_err_inrange = UINT64_MAX;
-
-    // try all allowed output dividers (o_div)
     for (uint32_t o_div = 0; o_div <= 31; ++o_div) {
         uint64_t o_mul = (uint64_t)(o_div + 2);
 
-        // compute total multiplier in 16.16 fixed point
-        uint64_t numer = (uint64_t)fout_hz * 2ULL * o_mul * 65536ULL;
-        uint64_t denom = XTAL;
-        uint64_t total_mul16 = (numer + denom / 2ULL) / denom;
-
-        int64_t sdm2_i = (int64_t)(total_mul16 >> 16) - 4;
-        if (sdm2_i < 0 || sdm2_i > 63) {
+        // Quick VCO feasibility check (fvco = fout * 2 * o_mul)
+        uint64_t fvco = (uint64_t)fout_hz * 2ULL * o_mul;
+        if (fvco < VCO_MIN || fvco > VCO_MAX)
             continue;
-        }
 
-        uint8_t sdm2 = (uint8_t)sdm2_i;
-        uint16_t base_frac16 = (uint16_t)(total_mul16 & 0xFFFFU);
+        // Ideal multiplier in 16.16 fixed: total_mul16 = (fout * 2 * o_mul * 65536) / XTAL
+        // compute numerator (64-bit). Add half divisor for rounding.
+        // Use 128-bit style via uint64 because values fit: fout*2*o_mul*65536 <= ~125e6*2*33*65536 ~ 5.4e14 < 2^63
+        double ideal_mul16_d = ((double)fout_hz * 2.0 * (double)o_mul * 65536.0) / (double)XTAL;
+        int64_t center = (int64_t)(ideal_mul16_d + 0.5); // nearest integer
 
-        // produced frequency
-        uint64_t produced_mul16 = ((uint64_t)(4 + sdm2) << 16) | (uint64_t)base_frac16;
-        uint64_t produced_num = XTAL * produced_mul16;
-        uint64_t produced_den = o_mul * 2ULL * 65536ULL;
-        uint64_t produced_freq_hz = (produced_num + produced_den / 2ULL) / produced_den;
+        for (int delta = -NEAR; delta <= NEAR; ++delta) {
+            int64_t total_mul16 = center + delta;
+            if (total_mul16 <= 0)
+                continue;
 
-        uint64_t err = (produced_freq_hz > fout_hz) ? (produced_freq_hz - fout_hz) : (fout_hz - produced_freq_hz);
-
-        // compute fractional delta for deviation
-        uint64_t dev_numer = (uint64_t)dev_hz * 2ULL * o_mul * 65536ULL;
-        uint64_t dev_denom = XTAL;
-        uint64_t dev_frac = (dev_numer + dev_denom / 2ULL) / dev_denom;
-        if (dev_frac > 0xFFFFULL)
-            dev_frac = 0xFFFFULL;
-        uint16_t dev_frac16 = (uint16_t)dev_frac;
-
-        // update absolute best
-        if (!have_best || err < best_err) {
-            have_best = true;
-            best_err = err;
-            best.o_div = (uint8_t)o_div;
-            best.sdm2 = sdm2;
-            best.base_frac16 = base_frac16;
-            best.dev_frac16 = dev_frac16;
-        }
-
-        // update in-range best
-        uint64_t vco = (uint64_t)fout_hz * 2ULL * o_mul;
-        if (vco >= VCO_MIN && vco <= VCO_MAX) {
-            if (!have_inrange || err < best_err_inrange) {
-                have_inrange = true;
-                best_inrange.o_div = (uint8_t)o_div;
-                best_inrange.sdm2 = sdm2;
-                best_inrange.base_frac16 = base_frac16;
-                best_inrange.dev_frac16 = dev_frac16;
-                best_err_inrange = err; // track separate in-range error
+            // compute sdm2 from top 16 bits minus 4
+            int64_t sdm2_i = (total_mul16 >> 16) - 4;
+            if (sdm2_i < 0 || sdm2_i > 63) {
+                // still try neighbors sdm2_i +- 1 if in range (cover boundaries)
+                // but for simplicity skip invalid here
+                continue;
             }
-        }
-    }
 
-    fm_apll_cfg_t chosen;
-    if (prefer_inrange && have_inrange) {
-        chosen = best_inrange;
-    } else if (have_best) {
-        chosen = best;
-    } else {
-        chosen = (fm_apll_cfg_t){ 0 };
-        chosen.is_rev0 = (efuse_ll_get_chip_ver_rev1() == 0);
-        ESP_LOGI(TAG, "no valid APLL candidate found");
-        return chosen;
-    }
+            uint8_t sdm2 = (uint8_t)sdm2_i;
 
-    // Adjust base_frac16 only when sdm2 is at 0 or 63 and ±dev_frac16 would overflow/underflow beyond the valid range 0..63.
-    if (chosen.dev_frac16 != 0) {
-        if (chosen.sdm2 == 0 && chosen.base_frac16 < chosen.dev_frac16) {
-            chosen.base_frac16 = chosen.dev_frac16;
-        } else if (chosen.sdm2 == 63 && chosen.base_frac16 > (uint16_t)(65535U - chosen.dev_frac16)) {
-            chosen.base_frac16 = (uint16_t)(65535U - chosen.dev_frac16);
-        }
-    }
+            // Also try sdm2 +/- 1 to capture edge cases
+            for (int sdm2_adj = -1; sdm2_adj <= 1; ++sdm2_adj) {
+                int64_t sdm2_try = (int64_t)sdm2 + sdm2_adj;
+                if (sdm2_try < 0 || sdm2_try > 63)
+                    continue;
 
-    chosen.is_rev0 = (efuse_ll_get_chip_ver_rev1() == 0);
+                // If we adjusted sdm2, we must adjust base to keep the same total multiplier:
+                int64_t total_desired = total_mul16;
+                int64_t top16 = (int64_t)(sdm2_try + 4);
+                int64_t base_try = total_desired - (top16 << 16);
+                if (base_try < 0 || base_try > 0xFFFF)
+                    continue;
+                uint16_t adj_base = (uint16_t)base_try;
 
-    return chosen;
+                // Compute integer numerator of produced frequency:
+                // produced_numer = XTAL * ( (4+sdm2_try)*65536 + adj_base )
+                // target_numer   = fout_hz * (2 * o_mul) * 65536
+                uint64_t produced_numer = (uint64_t)XTAL * ((uint64_t)(top16) * 65536ULL + (uint64_t)adj_base);
+                uint64_t target_numer = (uint64_t)fout_hz * (2ULL * o_mul) * 65536ULL;
+
+                uint64_t err_numer = (produced_numer > target_numer) ? (produced_numer - target_numer) : (target_numer - produced_numer);
+
+                // Compute dev_frac16 (rounded): dev_frac16 = round( dev_hz * 2 * o_mul * 65536 / XTAL )
+                uint64_t dev_numer = (uint64_t)dev_hz * 2ULL * o_mul * 65536ULL;
+                uint16_t dev_frac16 = (uint16_t)((dev_numer + (XTAL / 2ULL)) / XTAL);
+
+                // clamp adj_base to ensure +/- dev doesn't overflow at extremes
+                if (sdm2_try == 0 && adj_base < dev_frac16) {
+                    // If adjusting base would underflow below 0 when dev applied, bump it
+                    adj_base = dev_frac16;
+                    // recompute produced_numer and err_numer after adj clamp
+                    produced_numer = (uint64_t)XTAL * ((uint64_t)(top16) * 65536ULL + (uint64_t)adj_base);
+                    err_numer = (produced_numer > target_numer) ? (produced_numer - target_numer) : (target_numer - produced_numer);
+                }
+                if (sdm2_try == 63 && adj_base > (uint16_t)(0xFFFF - dev_frac16)) {
+                    adj_base = (uint16_t)(0xFFFF - dev_frac16);
+                    produced_numer = (uint64_t)XTAL * ((uint64_t)(top16) * 65536ULL + (uint64_t)adj_base);
+                    err_numer = (produced_numer > target_numer) ? (produced_numer - target_numer) : (target_numer - produced_numer);
+                }
+
+                // Update best
+                if (!have_best || err_numer < best_err_numer) {
+                    have_best = true;
+                    best_err_numer = err_numer;
+                    best.o_div = (uint8_t)o_div;
+                    best.sdm2 = (uint8_t)sdm2_try;
+                    best.base_frac16 = adj_base;
+                    best.dev_frac16 = dev_frac16;
+                }
+
+                // exact match fast exit
+                if (err_numer == 0ULL) {
+                    best.is_rev0 = 0;
+                    return best;
+                }
+            } // end sdm2 +/-1
+        } // end delta
+    } // end o_div
+
+    best.is_rev0 = 0;
+    return best;
 }
 
 /**
@@ -290,7 +297,7 @@ void fm_i2s_init(uint32_t wav_sr_hz) {
  * the rtc APLL registers and enables the APLL so the hardware begins generating
  * the requested clock. The base fractional bytes are split into sdm0/sdm1 for
  * rtc_clk_apll_coeff_set.
- * 
+ *
  * @param fm_carrier_hz Desired APLL output (carrier) in Hz
  * @param max_dev_hz Maximum desired frequency deviation in Hz (absolute)
  */
@@ -302,7 +309,7 @@ bool fm_apll_init(uint32_t fm_carrier_hz, uint32_t max_dev_hz) {
     }
 
     // Compute APLL configuration for target carrier and deviation
-    g_apll = fm_calc_apll(fm_carrier_hz, max_dev_hz);
+    g_apll = fm_calc_apll(get_xtal_hz(), fm_carrier_hz, max_dev_hz);
 
     // Extract fractional parts for hardware registers
     uint8_t sdm0 = (uint8_t)(g_apll.base_frac16 & 0xFF);
