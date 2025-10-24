@@ -77,7 +77,7 @@ static fm_apll_cfg_t fm_calc_apll(uint32_t fout_hz, uint32_t dev_hz) {
     uint64_t best_err_inrange = UINT64_MAX;
 
     // try all allowed output dividers (o_div)
-    for (uint32_t o_div = 0; o_div <= 3; ++o_div) {
+    for (uint32_t o_div = 0; o_div <= 31; ++o_div) {
         uint64_t o_mul = (uint64_t)(o_div + 2);
 
         // compute total multiplier in 16.16 fixed point
