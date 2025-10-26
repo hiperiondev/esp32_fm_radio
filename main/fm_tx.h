@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "polar_mod.h"
 /**
  * @brief Audio PLL (APLL) configuration used for FM transmission.
  *
@@ -25,6 +26,7 @@ typedef struct {
     uint32_t fm_carrier_hz;
     uint32_t max_dev_hz;
     uint32_t wav_sr_hz;
+    uint8_t modulation_gain;
 } tx_cfg_t;
 
 /**
@@ -38,6 +40,7 @@ typedef struct {
 typedef struct {
     tx_cfg_t tx_cfg;
     apll_cfg_t apll_cfg;
+    modulation_t modulation;
     wav_t wav;
 } tx_ctx_t;
 

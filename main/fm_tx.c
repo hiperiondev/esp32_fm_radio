@@ -18,6 +18,7 @@
 #include "soc/soc.h"
 
 #include "fm_tx.h"
+#include "polar_mod.h"
 
 #if !CONFIG_IDF_TARGET_ESP32
 #error "This project requires a chip with APLL (ESP32 D0WD / WROOM / WROVER). The S2/S3/C3 series do not have it."
@@ -220,6 +221,7 @@ static inline void fm_set_deviation(tx_ctx_t *tx_ctx, int16_t delta_frac16) {
  *
  * @param arg Unused (user arg passed by esp_timer, ignored)
  */
+/*
 static void IRAM_ATTR fm_timer_cb(void *arg) {
     tx_ctx_t *tx_ctx = (tx_ctx_t *)arg;
     static size_t pos = 0;                                   // position in embedded audio array
@@ -230,6 +232,73 @@ static void IRAM_ATTR fm_timer_cb(void *arg) {
     // scale signed audio to fractional LSB units and update APLL
     int16_t delta = (int16_t)(((int32_t)audio * (int32_t)tx_ctx->apll_cfg.dev_frac16) >> 7);
     fm_set_deviation(tx_ctx, delta);
+}
+*/
+
+static void IRAM_ATTR fm_timer_cb(void *arg) {
+    tx_ctx_t *tx_ctx = (tx_ctx_t *)arg;
+    static size_t pos = 0; // position in embedded audio array
+
+    /* Read next 8-bit unsigned PCM sample and convert to signed centered at 0.
+     * Note: modulation_am_pm expects a signed/int sample (implementation uses int).
+     */
+    int16_t audio_sample = (int16_t)tx_ctx->wav.audio[pos++] - 128; // convert unsigned->signed
+    if (pos >= tx_ctx->wav.audio_len)
+        pos = 0; // loop the audio
+
+    /* Use polar_mod's modulation_am_pm to compute AM/PM (phase) modulation outputs.
+     *
+     * modulation_am_pm signature (as provided by polar_mod.h) takes many parameters:
+     * - data: input sample (int)
+     * - modulation_mode: modulation type (use MOD_FM for FM-radio style)
+     * - filter/pre/post parameters: choose reasonable defaults matching the original project
+     * - agc_type and special_modulation: use normal modes
+     * - polar_status: status flags (0 = no special flags)
+     * - ampl_out, phase_diff_out: outputs (amplitude and phase-delta)
+     *
+     * We only need the phase_diff_out: it is expressed such that 2^24 == 360 degrees
+     * (i.e. one full cycle). The instantaneous frequency offset in Hz for a given
+     * sample is:
+     *
+     *   f_offset = (phase_diff_out / 2^24) * wav_sr_hz
+     *
+     * To convert this frequency offset into the APLL fractional units previously
+     * used by fm_set_deviation (which expects a delta in the same 1/65536 fractional
+     * units used by tx_ctx->apll_cfg.base_frac16 and tx_ctx->apll_cfg.dev_frac16),
+     * we map phase_diff_out linearly into the precomputed dev_frac16 range:
+     *
+     *   delta_frac16 = (phase_diff_out * dev_frac16) >> 24
+     *
+     * This maps a full-scale phase_diff_out (±2^23..2^24) to ±dev_frac16 which is
+     * how the rest of the code expects modulation depth (previous implementation
+     * mapped 8-bit audio into ±dev_frac16 using >>7). Using >>24 keeps the same
+     * relative scaling but driven by modulation_am_pm's phase output.
+     *
+     * Note: this approach assumes modulation_am_pm's phase output is already
+     * proportional to the desired instantaneous frequency deviation. If you prefer
+     * a different mapping (for example converting phase->Hz explicitly using the
+     * sample rate), replace the calculation of delta_frac16 accordingly.
+     */
+
+    int ampl = 0;
+    int phase_diff = 0;
+
+    /* Call modulation_am_pm with sensible defaults. These enum values are defined
+     * in polar_mod.h and correspond to the project's conventional settings.
+     */
+    modulation_am_pm(tx_ctx->modulation, (int)audio_sample, &ampl, &phase_diff);
+
+    /* Map phase_diff to APLL fractional units and update APLL */
+    int32_t delta_frac32 = (int32_t)(((int64_t)phase_diff * (int64_t)tx_ctx->apll_cfg.dev_frac16 * tx_ctx->tx_cfg.modulation_gain) >> 24);
+    // int32_t delta_frac32 = (int32_t)(((int64_t)phase_diff * (int64_t)tx_ctx->apll_cfg.dev_frac16) >> 24);
+
+    /* Clamp delta to int16 range just in case */
+    if (delta_frac32 > INT16_MAX)
+        delta_frac32 = INT16_MAX;
+    if (delta_frac32 < INT16_MIN)
+        delta_frac32 = INT16_MIN;
+
+    fm_set_deviation(tx_ctx, (int16_t)delta_frac32);
 }
 
 /**
@@ -324,14 +393,15 @@ bool fm_apll_init(tx_ctx_t *tx_ctx) {
     // Compute produced frequency from register configuration
     // Formula from ESP32 Technical Reference Manual (TRM):
     // f_out = XTAL * (4 + sdm2 + sdm1/256 + sdm0/65536) / (2 * (o_div + 2))
-    double fout_hz = (double)get_xtal_hz() * (4.0 + (double)tx_ctx->apll_cfg.sdm2 + (double)sdm1 / 256.0 + (double)sdm0 / 65536.0) / (2.0 * (tx_ctx->apll_cfg.o_div + 2));
+    double fout_hz =
+        (double)get_xtal_hz() * (4.0 + (double)tx_ctx->apll_cfg.sdm2 + (double)sdm1 / 256.0 + (double)sdm0 / 65536.0) / (2.0 * (tx_ctx->apll_cfg.o_div + 2));
 
     // Calculate frequency error in Hz (signed)
     double error_hz = fout_hz - (double)tx_ctx->tx_cfg.fm_carrier_hz;
 
     ESP_LOGI(TAG, "APLL configured: XTAL=%u Hz target=%.2f Hz produced=%.2f Hz error=%.2f Hz (o_div=%u sdm2=%u sdm1=%u sdm0=%u base_frac=%u dev_frac=%u)",
-             get_xtal_hz(), (double)tx_ctx->tx_cfg.fm_carrier_hz, fout_hz, error_hz, (unsigned)tx_ctx->apll_cfg.o_div, (unsigned)tx_ctx->apll_cfg.sdm2, (unsigned)sdm1,
-             (unsigned)sdm0, (unsigned)tx_ctx->apll_cfg.base_frac16, (unsigned)tx_ctx->apll_cfg.dev_frac16);
+             get_xtal_hz(), (double)tx_ctx->tx_cfg.fm_carrier_hz, fout_hz, error_hz, (unsigned)tx_ctx->apll_cfg.o_div, (unsigned)tx_ctx->apll_cfg.sdm2,
+             (unsigned)sdm1, (unsigned)sdm0, (unsigned)tx_ctx->apll_cfg.base_frac16, (unsigned)tx_ctx->apll_cfg.dev_frac16);
 
     return true;
 }
