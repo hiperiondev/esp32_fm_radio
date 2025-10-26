@@ -7,7 +7,8 @@ file(
 idf_component_register(
     SRCS ${SOURCES}
     INCLUDE_DIRS
-        ./
+        include
     REQUIRES
-        esp32_tx
+        driver
+        esp_timer
 )

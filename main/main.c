@@ -14,7 +14,7 @@ static char TAG[] = "main";
 
 void app_main() {
     tx_ctx_t tx_ctx = {
-        .tx_cfg.fm_carrier_hz = FM_CARRIER_HZ,                      //
+        .tx_cfg.carrier_hz = FM_CARRIER_HZ,                         //
         .tx_cfg.max_dev_hz = MAX_DEV_HZ,                            //
         .tx_cfg.wav_sr_hz = WAV_SR_HZ,                              //
         .tx_cfg.modulation_gain = MOD_GAIN,                         //
@@ -26,8 +26,8 @@ void app_main() {
         .modulation.agc_type = AGC_NORMAL,                          //
         .modulation.special_modulation = SPECIAL_MODULATION_NORMAL, //
         .modulation.polar_status = 0,                               //
-        .wav.audio = rickroll,                                      //
-        .wav.audio_len = rickroll_len                               //
+        .wav.audio = audio,                                         //
+        .wav.audio_len = audio_len                                  //
     };
 
     ESP_LOGI(TAG, "fm_i2s_init");

@@ -373,13 +373,13 @@ bool fm_apll_init(tx_ctx_t *tx_ctx) {
     apll_cfg_t g_apll;
 
     uint32_t min_carrier = get_xtal_hz() * 2 / 5;
-    if (tx_ctx->tx_cfg.fm_carrier_hz < min_carrier || tx_ctx->tx_cfg.fm_carrier_hz > 125000000) {
-        ESP_LOGI(TAG, "Carrier out of range [%uMhz, 125MHz]: %0.2fMHz", min_carrier / 1000000, tx_ctx->tx_cfg.fm_carrier_hz / 1000000.0);
+    if (tx_ctx->tx_cfg.carrier_hz < min_carrier || tx_ctx->tx_cfg.carrier_hz > 125000000) {
+        ESP_LOGI(TAG, "Carrier out of range [%uMhz, 125MHz]: %0.2fMHz", min_carrier / 1000000, tx_ctx->tx_cfg.carrier_hz / 1000000.0);
         return false;
     }
 
     // Compute APLL configuration for target carrier and deviation
-    g_apll = fm_calc_apll(get_xtal_hz(), tx_ctx->tx_cfg.fm_carrier_hz, tx_ctx->tx_cfg.max_dev_hz);
+    g_apll = fm_calc_apll(get_xtal_hz(), tx_ctx->tx_cfg.carrier_hz, tx_ctx->tx_cfg.max_dev_hz);
     memcpy(&tx_ctx->apll_cfg, &g_apll, (sizeof(apll_cfg_t)));
 
     // Extract fractional parts for hardware registers
@@ -397,10 +397,10 @@ bool fm_apll_init(tx_ctx_t *tx_ctx) {
         (double)get_xtal_hz() * (4.0 + (double)tx_ctx->apll_cfg.sdm2 + (double)sdm1 / 256.0 + (double)sdm0 / 65536.0) / (2.0 * (tx_ctx->apll_cfg.o_div + 2));
 
     // Calculate frequency error in Hz (signed)
-    double error_hz = fout_hz - (double)tx_ctx->tx_cfg.fm_carrier_hz;
+    double error_hz = fout_hz - (double)tx_ctx->tx_cfg.carrier_hz;
 
     ESP_LOGI(TAG, "APLL configured: XTAL=%u Hz target=%.2f Hz produced=%.2f Hz error=%.2f Hz (o_div=%u sdm2=%u sdm1=%u sdm0=%u base_frac=%u dev_frac=%u)",
-             get_xtal_hz(), (double)tx_ctx->tx_cfg.fm_carrier_hz, fout_hz, error_hz, (unsigned)tx_ctx->apll_cfg.o_div, (unsigned)tx_ctx->apll_cfg.sdm2,
+             get_xtal_hz(), (double)tx_ctx->tx_cfg.carrier_hz, fout_hz, error_hz, (unsigned)tx_ctx->apll_cfg.o_div, (unsigned)tx_ctx->apll_cfg.sdm2,
              (unsigned)sdm1, (unsigned)sdm0, (unsigned)tx_ctx->apll_cfg.base_frac16, (unsigned)tx_ctx->apll_cfg.dev_frac16);
 
     return true;

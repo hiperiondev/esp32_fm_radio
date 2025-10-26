@@ -23,7 +23,7 @@ typedef struct {
 } apll_cfg_t;
 
 typedef struct {
-    uint32_t fm_carrier_hz;
+    uint32_t carrier_hz;
     uint32_t max_dev_hz;
     uint32_t wav_sr_hz;
     uint8_t modulation_gain;
