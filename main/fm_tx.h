@@ -19,15 +19,27 @@ typedef struct {
     uint16_t base_frac16; /**< 16-bit fractional part (sdm1:sdm0) used as center */
     uint16_t dev_frac16;  /**< ±deviation expressed in same fractional units */
     bool is_rev0;         /**< true if chip revision is rev0 (affects APLL configuration) */
-} fm_apll_cfg_t;
+} apll_cfg_t;
+
+typedef struct {
+    uint32_t fm_carrier_hz;
+    uint32_t max_dev_hz;
+    uint32_t wav_sr_hz;
+} tx_cfg_t;
 
 /**
- * @brief WAV to transmit 
-*/
+ * @brief WAV to transmit
+ */
 typedef struct {
     const unsigned char *audio;
     const unsigned int audio_len;
 } wav_t;
+
+typedef struct {
+    tx_cfg_t tx_cfg;
+    apll_cfg_t apll_cfg;
+    wav_t wav;
+} tx_ctx_t;
 
 /**
  * @brief Initialize and configure the I2S peripheral to use APLL as clock source.
@@ -37,10 +49,8 @@ typedef struct {
  * implementation. The MCLK output is not assigned to a GPIO in this function (see
  * fm_route_to_pin()). After calling this, the I2S channel will be enabled and ready
  * to provide MCLK derived from APLL.
- *
- * @param wav_sr_hz Sample rate
  */
-void fm_i2s_init(uint32_t wav_sr_hz);
+void fm_i2s_init(tx_ctx_t tx_ctx);
 
 /**
  * @brief Calculate and initialize the global APLL configuration and enable APLL.
@@ -49,11 +59,8 @@ void fm_i2s_init(uint32_t wav_sr_hz);
  * requested carrier frequency taking into account the XTAL frequency and ensuring
  * the internal VCO stays within the valid lock range. It also programs the APLL
  * registers (via rtc_clk_apll_coeff_set) and enables the APLL.
- *
- * @param fm_carrier_hz Desired APLL output (carrier) in Hz
- * @param max_dev_hz Maximum desired frequency deviation in Hz (absolute)
  */
-bool fm_apll_init(uint32_t fm_carrier_hz, uint32_t max_dev_hz);
+bool fm_apll_init(tx_ctx_t *tx_ctx);
 
 /**
  * @brief Route the I2S MCLK (APLL derived) to a physical GPIO pin.
@@ -70,10 +77,7 @@ void fm_route_to_pin(void);
  * The timer callback reads 8-bit PCM samples from the embedded audio array,
  * converts them to signed values, scales them by the precomputed deviation in
  * fractional LSB units and calls fm_set_deviation to update the APLL.
- *
- * @param wav_sr_hz Sample rate
- * @param wav_file Wav data
  */
-void fm_start_audio(uint32_t wav_sr_hz, wav_t *wav_file);
+void fm_start_audio(tx_ctx_t *tx_ctx);
 
 #endif // FM_TX_H

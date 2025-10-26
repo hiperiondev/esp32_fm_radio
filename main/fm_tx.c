@@ -24,7 +24,6 @@
 #endif
 
 static const char *TAG = "fm_tx";
-static fm_apll_cfg_t g_apll;
 static i2s_chan_handle_t tx_handle;
 
 /**
@@ -56,8 +55,8 @@ static inline uint32_t get_xtal_hz(void) {
  * @param dev_hz Maximum desired frequency deviation in Hz (absolute)
  * @return Populated fm_apll_cfg_t structure
  */
-static fm_apll_cfg_t fm_calc_apll(uint32_t xtal_hz, uint32_t fout_hz, uint32_t dev_hz) {
-    fm_apll_cfg_t best = { 0 };
+static apll_cfg_t fm_calc_apll(uint32_t xtal_hz, uint32_t fout_hz, uint32_t dev_hz) {
+    apll_cfg_t best = { 0 };
     if (xtal_hz == 0)
         return best;
 
@@ -177,9 +176,9 @@ static fm_apll_cfg_t fm_calc_apll(uint32_t xtal_hz, uint32_t fout_hz, uint32_t d
  *
  * @param delta_frac16 Signed deviation in 1/65536 fractional units to apply
  */
-static inline void fm_set_deviation(int16_t delta_frac16) {
-    int32_t frac32 = (int32_t)g_apll.base_frac16 + (int32_t)delta_frac16; // fractional accumulator
-    int32_t sdm2 = (int32_t)g_apll.sdm2;                                  // integer part
+static inline void fm_set_deviation(tx_ctx_t *tx_ctx, int16_t delta_frac16) {
+    int32_t frac32 = (int32_t)tx_ctx->apll_cfg.base_frac16 + (int32_t)delta_frac16; // fractional accumulator
+    int32_t sdm2 = (int32_t)tx_ctx->apll_cfg.sdm2;                                  // integer part
 
     // borrow if fractional part underflows
     if (frac32 < 0) {
@@ -208,7 +207,7 @@ static inline void fm_set_deviation(int16_t delta_frac16) {
     uint8_t sdm2_u8 = (uint8_t)sdm2;
 
     // update APLL config via low-level clock driver
-    clk_ll_apll_set_config(g_apll.is_rev0, (uint8_t)g_apll.o_div, sdm0, sdm1, sdm2_u8);
+    clk_ll_apll_set_config(tx_ctx->apll_cfg.is_rev0, (uint8_t)tx_ctx->apll_cfg.o_div, sdm0, sdm1, sdm2_u8);
 }
 
 /**
@@ -222,15 +221,15 @@ static inline void fm_set_deviation(int16_t delta_frac16) {
  * @param arg Unused (user arg passed by esp_timer, ignored)
  */
 static void IRAM_ATTR fm_timer_cb(void *arg) {
-    wav_t *wav = (wav_t *)arg;
-    static size_t pos = 0;                            // position in embedded audio array
-    int16_t audio = (int16_t)wav->audio[pos++] - 128; // convert unsigned->signed
-    if (pos >= wav->audio_len)
+    tx_ctx_t *tx_ctx = (tx_ctx_t *)arg;
+    static size_t pos = 0;                                   // position in embedded audio array
+    int16_t audio = (int16_t)tx_ctx->wav.audio[pos++] - 128; // convert unsigned->signed
+    if (pos >= tx_ctx->wav.audio_len)
         pos = 0; // loop the audio
 
     // scale signed audio to fractional LSB units and update APLL
-    int16_t delta = (int16_t)(((int32_t)audio * (int32_t)g_apll.dev_frac16) >> 7);
-    fm_set_deviation(delta);
+    int16_t delta = (int16_t)(((int32_t)audio * (int32_t)tx_ctx->apll_cfg.dev_frac16) >> 7);
+    fm_set_deviation(tx_ctx, delta);
 }
 
 /**
@@ -261,7 +260,7 @@ void fm_route_to_pin(void) {
  *
  * @param wav_sr_hz Sample rate
  */
-void fm_i2s_init(uint32_t wav_sr_hz) {
+void fm_i2s_init(tx_ctx_t tx_ctx) {
     // create new I2S channel in master role
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
     ESP_ERROR_CHECK(i2s_new_channel(&chan_cfg, &tx_handle, NULL));
@@ -269,7 +268,7 @@ void fm_i2s_init(uint32_t wav_sr_hz) {
     // configure standard I2S settings; note mclk_multiple requests high-speed MCLK
     i2s_std_config_t std_cfg = {
         .clk_cfg = {
-            .sample_rate_hz = wav_sr_hz, // audio sample rate defines timer rate
+            .sample_rate_hz = tx_ctx.tx_cfg.wav_sr_hz, // audio sample rate defines timer rate
             .clk_src = I2S_CLK_SRC_APLL, // use audio PLL
             .mclk_multiple = I2S_MCLK_MULTIPLE_512 // request large MCLK multiple
         },
@@ -287,7 +286,7 @@ void fm_i2s_init(uint32_t wav_sr_hz) {
     ESP_ERROR_CHECK(i2s_channel_init_std_mode(tx_handle, &std_cfg));
     ESP_ERROR_CHECK(i2s_channel_enable(tx_handle));
 
-    ESP_LOGI(TAG, "I2S STD channel started (APLL source, %u Hz sample rate)", wav_sr_hz);
+    ESP_LOGI(TAG, "I2S STD channel started (APLL source, %u Hz sample rate)", tx_ctx.tx_cfg.wav_sr_hz);
 }
 
 /**
@@ -301,35 +300,38 @@ void fm_i2s_init(uint32_t wav_sr_hz) {
  * @param fm_carrier_hz Desired APLL output (carrier) in Hz
  * @param max_dev_hz Maximum desired frequency deviation in Hz (absolute)
  */
-bool fm_apll_init(uint32_t fm_carrier_hz, uint32_t max_dev_hz) {
+bool fm_apll_init(tx_ctx_t *tx_ctx) {
+    apll_cfg_t g_apll;
+
     uint32_t min_carrier = get_xtal_hz() * 2 / 5;
-    if (fm_carrier_hz < min_carrier || fm_carrier_hz > 125000000) {
-        ESP_LOGI(TAG, "Carrier out of range [%uMhz, 125MHz]: %0.2fMHz", min_carrier / 1000000, fm_carrier_hz / 1000000.0);
+    if (tx_ctx->tx_cfg.fm_carrier_hz < min_carrier || tx_ctx->tx_cfg.fm_carrier_hz > 125000000) {
+        ESP_LOGI(TAG, "Carrier out of range [%uMhz, 125MHz]: %0.2fMHz", min_carrier / 1000000, tx_ctx->tx_cfg.fm_carrier_hz / 1000000.0);
         return false;
     }
 
     // Compute APLL configuration for target carrier and deviation
-    g_apll = fm_calc_apll(get_xtal_hz(), fm_carrier_hz, max_dev_hz);
+    g_apll = fm_calc_apll(get_xtal_hz(), tx_ctx->tx_cfg.fm_carrier_hz, tx_ctx->tx_cfg.max_dev_hz);
+    memcpy(&tx_ctx->apll_cfg, &g_apll, (sizeof(apll_cfg_t)));
 
     // Extract fractional parts for hardware registers
-    uint8_t sdm0 = (uint8_t)(g_apll.base_frac16 & 0xFF);
-    uint8_t sdm1 = (uint8_t)((g_apll.base_frac16 >> 8) & 0xFF);
+    uint8_t sdm0 = (uint8_t)(tx_ctx->apll_cfg.base_frac16 & 0xFF);
+    uint8_t sdm1 = (uint8_t)((tx_ctx->apll_cfg.base_frac16 >> 8) & 0xFF);
 
     // Enable APLL and set coefficients
     rtc_clk_apll_enable(true);
-    rtc_clk_apll_coeff_set(g_apll.o_div, sdm0, sdm1, g_apll.sdm2);
+    rtc_clk_apll_coeff_set(tx_ctx->apll_cfg.o_div, sdm0, sdm1, tx_ctx->apll_cfg.sdm2);
 
     // Compute produced frequency from register configuration
     // Formula from ESP32 Technical Reference Manual (TRM):
     // f_out = XTAL * (4 + sdm2 + sdm1/256 + sdm0/65536) / (2 * (o_div + 2))
-    double fout_hz = (double)get_xtal_hz() * (4.0 + (double)g_apll.sdm2 + (double)sdm1 / 256.0 + (double)sdm0 / 65536.0) / (2.0 * (g_apll.o_div + 2));
+    double fout_hz = (double)get_xtal_hz() * (4.0 + (double)tx_ctx->apll_cfg.sdm2 + (double)sdm1 / 256.0 + (double)sdm0 / 65536.0) / (2.0 * (tx_ctx->apll_cfg.o_div + 2));
 
     // Calculate frequency error in Hz (signed)
-    double error_hz = fout_hz - (double)fm_carrier_hz;
+    double error_hz = fout_hz - (double)tx_ctx->tx_cfg.fm_carrier_hz;
 
     ESP_LOGI(TAG, "APLL configured: XTAL=%u Hz target=%.2f Hz produced=%.2f Hz error=%.2f Hz (o_div=%u sdm2=%u sdm1=%u sdm0=%u base_frac=%u dev_frac=%u)",
-             get_xtal_hz(), (double)fm_carrier_hz, fout_hz, error_hz, (unsigned)g_apll.o_div, (unsigned)g_apll.sdm2, (unsigned)sdm1, (unsigned)sdm0,
-             (unsigned)g_apll.base_frac16, (unsigned)g_apll.dev_frac16);
+             get_xtal_hz(), (double)tx_ctx->tx_cfg.fm_carrier_hz, fout_hz, error_hz, (unsigned)tx_ctx->apll_cfg.o_div, (unsigned)tx_ctx->apll_cfg.sdm2, (unsigned)sdm1,
+             (unsigned)sdm0, (unsigned)tx_ctx->apll_cfg.base_frac16, (unsigned)tx_ctx->apll_cfg.dev_frac16);
 
     return true;
 }
@@ -343,11 +345,15 @@ bool fm_apll_init(uint32_t fm_carrier_hz, uint32_t max_dev_hz) {
  * @param wav_sr_hz Sample rate
  * @param wav_file Wav data
  */
-void fm_start_audio(uint32_t wav_sr_hz, wav_t *wav_file) {
-    const esp_timer_create_args_t args = { .callback = &fm_timer_cb, .name = "fm_audio_timer", .arg = (void *)wav_file };
+void fm_start_audio(tx_ctx_t *tx_ctx) {
+    const esp_timer_create_args_t args = {
+        .callback = &fm_timer_cb, //
+        .name = "fm_audio_timer", //
+        .arg = (void *)tx_ctx     //
+    };
     esp_timer_handle_t timer = NULL;
     ESP_ERROR_CHECK(esp_timer_create(&args, &timer));
-    const uint64_t period_us = 1000000ULL / wav_sr_hz;
+    const uint64_t period_us = 1000000ULL / tx_ctx->tx_cfg.wav_sr_hz;
     ESP_ERROR_CHECK(esp_timer_start_periodic(timer, period_us));
-    ESP_LOGI(TAG, "Audio timer started at %u Hz", wav_sr_hz);
+    ESP_LOGI(TAG, "Audio timer started at %u Hz", tx_ctx->tx_cfg.wav_sr_hz);
 }
