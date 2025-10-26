@@ -57,7 +57,7 @@ typedef enum SPECIAL_MODULATION_E {
     SPECIAL_MODULATION_FM_DIRECT,       //
     SPECIAL_MODULATION_AM_DIRECT,       //
     SPECIAL_MODULATION_AM_SIG500,       // AM with 500Hz sinus, with 100% modulation level
-    SPECIAL_MODULATION_AM_SAWTOOTH,     // macht gar keinen Sägezahn ?!??!
+    SPECIAL_MODULATION_AM_SAWTOOTH,     // TODO: doesn't make a sawtooth at all?
     SPECIAL_MODULATION_AM_RECT_100,     //
     SPECIAL_MODULATION_AM_RECT_1000,    //
     SPECIAL_MODULATION_AM_3STEP,        // 3 steps for dig att directly

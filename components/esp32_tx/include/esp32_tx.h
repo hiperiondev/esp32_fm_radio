@@ -1,5 +1,5 @@
-#ifndef FM_TX_H
-#define FM_TX_H
+#ifndef ESP32_TX_H
+#define ESP32_TX_H
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -7,7 +7,6 @@
 #include "polar_mod.h"
 /**
  * @brief Audio PLL (APLL) configuration used for FM transmission.
- *
  * Fields correspond to the APLL hardware registers / configuration used
  * to produce the requested output frequency. The fractional field
  * base_frac16 represents the 16-bit fractional part (sdm1:sdm0) and
@@ -46,28 +45,29 @@ typedef struct {
 
 /**
  * @brief Initialize and configure the I2S peripheral to use APLL as clock source.
- *
  * This function sets up an I2S TX channel in master mode. The function configures
  * the clock source to I2S_CLK_SRC_APLL and requests the sample rate defined in the
  * implementation. The MCLK output is not assigned to a GPIO in this function (see
  * fm_route_to_pin()). After calling this, the I2S channel will be enabled and ready
  * to provide MCLK derived from APLL.
+ *
+ * @param tx_ctx Context
  */
 void fm_i2s_init(tx_ctx_t tx_ctx);
 
 /**
  * @brief Calculate and initialize the global APLL configuration and enable APLL.
- *
  * This function computes sdm2, sdm1:sdm0 and o_div values that will generate the
  * requested carrier frequency taking into account the XTAL frequency and ensuring
  * the internal VCO stays within the valid lock range. It also programs the APLL
  * registers (via rtc_clk_apll_coeff_set) and enables the APLL.
+ *
+ * @param tx_ctx Context
  */
 bool fm_apll_init(tx_ctx_t *tx_ctx);
 
 /**
  * @brief Route the I2S MCLK (APLL derived) to a physical GPIO pin.
- *
  * This maps the MCLK (CLK_OUT1) to GPIO0 and sets that GPIO as an output.
  * Note: GPIO0 is a strapping pin on many ESP32 modules; care must be taken
  * when using it as an RF output that the board can still boot normally.
@@ -76,11 +76,12 @@ void fm_route_to_pin(void);
 
 /**
  * @brief Start the periodic audio timer that performs real-time FM modulation.
- *
  * The timer callback reads 8-bit PCM samples from the embedded audio array,
  * converts them to signed values, scales them by the precomputed deviation in
  * fractional LSB units and calls fm_set_deviation to update the APLL.
+ *
+ * @param tx_ctx Context
  */
 void fm_start_audio(tx_ctx_t *tx_ctx);
 
-#endif // FM_TX_H
+#endif // ESP32_TX_H

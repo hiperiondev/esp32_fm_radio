@@ -12,12 +12,12 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "hal/clk_tree_ll.h"
-#include "hal/efuse_ll.h"
+// #include "hal/efuse_ll.h"
 #include "soc/io_mux_reg.h"
 #include "soc/rtc.h"
 #include "soc/soc.h"
 
-#include "fm_tx.h"
+#include "esp32_tx.h"
 #include "polar_mod.h"
 
 #if !CONFIG_IDF_TARGET_ESP32
@@ -29,7 +29,6 @@ static i2s_chan_handle_t tx_handle;
 
 /**
  * @brief Return the chip's crystal oscillator frequency in Hz.
- *
  * Uses the RTC helper rtc_clk_xtal_freq_get() which returns MHz; convert to Hz.
  *
  * @return XTAL frequency in Hz (e.g., 40000000 for a 40 MHz crystal)
@@ -41,7 +40,6 @@ static inline uint32_t get_xtal_hz(void) {
 
 /**
  * @brief Compute APLL configuration parameters for a requested output and deviation.
- *
  * This routine finds the smallest o_div such that the internal VCO frequency
  * (fout * 2 * (o_div + 2)) is >= 350 MHz (APLL lock constraint). It then
  * computes sdm2 and the 16-bit fractional component (base_frac16) to produce
@@ -54,7 +52,7 @@ static inline uint32_t get_xtal_hz(void) {
  *
  * @param fout_hz Desired APLL output (carrier) in Hz
  * @param dev_hz Maximum desired frequency deviation in Hz (absolute)
- * @return Populated fm_apll_cfg_t structure
+ * @return Populated apll_cfg_t structure
  */
 static apll_cfg_t fm_calc_apll(uint32_t xtal_hz, uint32_t fout_hz, uint32_t dev_hz) {
     apll_cfg_t best = { 0 };
@@ -168,13 +166,13 @@ static apll_cfg_t fm_calc_apll(uint32_t xtal_hz, uint32_t fout_hz, uint32_t dev_
 
 /**
  * @brief Apply a signed fractional deviation to the currently configured APLL.
- *
  * This routine takes delta_frac16, adds it to the stored base fractional value
  * and manages carry/borrow into sdm2 (the integer portion) so the combined
  * sdm2 + fractional value is a valid representation. It clamps the resulting
  * sdm2 and fractional value to the allowed hardware ranges and then calls the
  * low-level clock driver to update APLL config immediately.
  *
+ * @param tx_ctx Context
  * @param delta_frac16 Signed deviation in 1/65536 fractional units to apply
  */
 static inline void fm_set_deviation(tx_ctx_t *tx_ctx, int16_t delta_frac16) {
@@ -213,27 +211,13 @@ static inline void fm_set_deviation(tx_ctx_t *tx_ctx, int16_t delta_frac16) {
 
 /**
  * @brief Timer callback executed at the audio sample rate to update APLL deviation.
- *
  * The ISR reads the next sample from the embedded 8-bit PCM array, converts it
  * to signed form (-128..127), scales it by the precomputed dev_frac16 and calls
  * fm_set_deviation() to update the APLL fractional registers. This callback is
  * marked IRAM_ATTR to ensure it runs from instruction RAM for timing consistency.
  *
- * @param arg Unused (user arg passed by esp_timer, ignored)
+ * @param arg Context
  */
-/*
-static void IRAM_ATTR fm_timer_cb(void *arg) {
-    tx_ctx_t *tx_ctx = (tx_ctx_t *)arg;
-    static size_t pos = 0;                                   // position in embedded audio array
-    int16_t audio = (int16_t)tx_ctx->wav.audio[pos++] - 128; // convert unsigned->signed
-    if (pos >= tx_ctx->wav.audio_len)
-        pos = 0; // loop the audio
-
-    // scale signed audio to fractional LSB units and update APLL
-    int16_t delta = (int16_t)(((int32_t)audio * (int32_t)tx_ctx->apll_cfg.dev_frac16) >> 7);
-    fm_set_deviation(tx_ctx, delta);
-}
-*/
 
 static void IRAM_ATTR fm_timer_cb(void *arg) {
     tx_ctx_t *tx_ctx = (tx_ctx_t *)arg;
@@ -303,7 +287,6 @@ static void IRAM_ATTR fm_timer_cb(void *arg) {
 
 /**
  * @brief Route the I2S-derived MCLK to GPIO0 (CLK_OUT1) and set it as output.
- *
  * After calling this, the selected GPIO will present the MCLK output as a
  * continuous digital clock signal derived from the APLL when the I2S driver
  * has been configured and enabled.
@@ -320,7 +303,6 @@ void fm_route_to_pin(void) {
 
 /**
  * @brief Initialize I2S in standard TX master mode using APLL as clock source.
- *
  * The implementation creates a new I2S channel and configures it for the
  * sample rate used by the embedded waveform. The MCLK routing in this build
  * intentionally leaves the MCLK GPIO unassigned (fm_route_to_pin handles
@@ -360,14 +342,12 @@ void fm_i2s_init(tx_ctx_t tx_ctx) {
 
 /**
  * @brief Initialize and program the APLL registers for the chosen carrier and deviation.
- *
  * This routine computes the APLL constants using fm_calc_apll(), then programs
  * the rtc APLL registers and enables the APLL so the hardware begins generating
  * the requested clock. The base fractional bytes are split into sdm0/sdm1 for
  * rtc_clk_apll_coeff_set.
  *
- * @param fm_carrier_hz Desired APLL output (carrier) in Hz
- * @param max_dev_hz Maximum desired frequency deviation in Hz (absolute)
+ * @param tx_ctx Context
  */
 bool fm_apll_init(tx_ctx_t *tx_ctx) {
     apll_cfg_t g_apll;
@@ -408,12 +388,10 @@ bool fm_apll_init(tx_ctx_t *tx_ctx) {
 
 /**
  * @brief Start a periodic high-resolution timer to drive audio modulation.
- *
  * The function creates an esp_timer configured with the callback above and
  * starts it in periodic mode with period derived from the WAV sample rate.
  *
- * @param wav_sr_hz Sample rate
- * @param wav_file Wav data
+ * @param tx_ctx Context
  */
 void fm_start_audio(tx_ctx_t *tx_ctx) {
     const esp_timer_create_args_t args = {
