@@ -1,76 +1,237 @@
-## *Note:* This code is an adaptation of the original code, corrected to compile with ESP-IDF 5.5.1. The routine for calculating base values ​​for the APLL configuration has also been corrected (Max error of Carrier = 76.29 Hz). For the original code reffer to: https://github.com/Alexxdal/ESP32FMRadio
-# ESP32FMRadio: FM Transmission Using APLL andI2S MCLK on ESP32
+# ESP32 FM Transmitter
 
-**ESP32FMRadio** is a project that turns an ESP32 microcontroller into a mini FM radio transmitter by
-exploiting the ESP32’s Audio PLL (APLL) and I2S peripheral’s master clock (MCLK) output. Instead of
-using PWM or DAC methods, this approach directly generates an RF carrier (in the FM band, e.g.
-~100 MHz) on a GPIO pin using the ESP32’s high-frequency clock capabilities. The carrier is then
-**frequency modulated (FM)** with an audio signal (in this case, an 8 kHz sampled audio of the famous
-Rick Astley song) to produce a broadcastable FM radio signal. The result is a simple but functional FM
-transmitter, achieved purely with the ESP32’s internal hardware (no external RF transmitter chip). This
-write-up explains in detail how the APLL and I2S MCLK are configured and utilized to achieve FM
-transmission.
+## Overview
 
-## The ESP32’s Audio PLL (APLL) and Frequency Generation
-The **Audio PLL (APLL)** in the ESP32 is a dedicated phase-locked loop designed to generate precise high-
-frequency clocks for audio applications (like I2S or DAC sampling). Unlike the main CPU clock PLLs, the
-APLL can be tuned to arbitrary frequencies in a certain range, making it ideal for generating a custom
-frequency for our FM carrier.
+This project transforms an ESP32 microcontroller into a basic FM radio transmitter by leveraging its internal hardware components. It generates a carrier frequency in the FM band and modulates it with audio data to broadcast signals that can be received by standard FM radios. The implementation focuses on using the Audio Phase-Locked Loop (APLL) for precise frequency control and the Inter-IC Sound (I2S) peripheral to output the modulated signal. Audio modulation is handled through a polar coordinate-based approach, allowing for efficient amplitude and phase adjustments.
 
-- **APLL Output Formula:** The frequency output by the APLL is determined by a formula involving the 40 MHz crystal oscillator (XTAL) and programmable dividers. In essence, the APLL allows setting an integer and fractional divider (often represented by ```sdm2``` , ```sdm1``` , ```sdm0``` for the fractional synthesizer and an ```o_div``` output divider). The Technical Reference Manual indicates the formula (for ESP32 rev.0 chips) as:
-![equation](https://latex.codecogs.com/svg.image?$$f_{\text{out}}=f_{\text{xtal}}\times\frac{4&plus;\text{sdm2}&plus;\dfrac{\text{sdm1}}{2^{8}}&plus;\dfrac{\text{sdm0}}{2^{16}}}{2\times\bigl(o_{\text{div}}&plus;2\bigr)}$$)
+The transmitter operates at low power, making it suitable for short-range demonstrations or experiments. It includes support for various modulation modes, filters, and automatic gain control (AGC) to process input signals. Note that this is an educational and experimental tool; users should comply with local regulations regarding radio transmissions to avoid interference.
 
-This means the base multiplier is ```4 + sdm_fractional``` divided by ```2*(o_div+2)```. For
-example, with a 40 MHz crystal, choosing appropriate values (sdm2, sdm1, sdm0, o_div) can yield a
-desired output. The APLL has certain locking constraints: the internal VCO (numerator part,
-```f × xtal (4 + sdm2 + ...)```) must lie between 350 MHz and 500 MHz to lock properly. If it's outside this
-range, the PLL won’t stabilize (too low or too high).
+## Features
 
-- **Generating a 100 MHz Carrier:** In our case, we target an FM carrier around 100 MHz (within the commercial FM band). Using the formula, one simple valid configuration is to set ```o_div = 0``` (minimal division) and adjust ```sdm``` such that the numerator becomes 400 MHz (which divided by 4 gives 100 MHz). For instance, setting ```sdm2 = 6``` , ```sdm1 = 0``` , ```sdm0 = 0``` yields: ```fout = 40 MHz × (4 + 6 + 0 + 0)/(2 × (0 + 2)) = 40 × 10/4 = 100 MHz``` via the ```fm_calc_apll()``` function to handle different target frequencies and ensure the lock conditions are met (finding the smallest o_div that keeps the VCO ≥350 MHz, etc.).
+- Generates FM carrier frequencies between approximately 76 MHz and 125 MHz.
+- Supports frequency modulation with configurable deviation (e.g., up to 75 kHz for wide FM).
+- Includes embedded audio playback for testing, with looping capability.
+- Configurable modulation types, including narrow FM, wide FM, AM, SSB, and test signals.
+- Audio processing pipeline with high-pass, low-pass, and passband filters.
+- Automatic gain control for consistent signal levels.
+- Outputs the RF signal directly on a GPIO pin (default: GPIO0).
+- Compatible only with original ESP32 chips (not S2, S3, or C3 variants due to hardware limitations).
 
-- **Frequency Resolution:** The APLL offers fine frequency control via the 16-bit fractional part (sdm0) of the synthesizer. The smallest step (1 LSB of sdm0) corresponds to a few tens or hundreds of Hz change in output frequency, depending on o_div. In our 100 MHz example with o_div=0, one LSB of the 16-bit fraction changes the output by roughly ~152 Hz (since 1 step out of 2^16 of 400 MHz VCO is ~6.1 kHz at VCO, divided by 4 gives ~1.5 kHz). Actually, the code calculates this precisely: ```sb_hz = XTAL / (2*(o_div+2)*65536)```, and for o_div=0 that is ```40e6/(4 ∗ 65536)```. This fine control is what allows us to modulate the frequency smoothly with audio.
+## Requirements
 
-## Using I2S MCLK to Output the RF Carrier
-The ESP32’s **I2S (Inter-IC Sound)** peripheral is typically used for digital audio data, but it also provides a **Master Clock (MCLK)** output intended to drive external DAC/ADC chips. We can repurpose this MCLK output to drive our antenna (GPIO pin) with the high-frequency carrier from the APLL.
+### Hardware
+- ESP32 development board (e.g., ESP32-WROOM or ESP32-WROVER module). Must be the original ESP32 silicon revision with APLL support.
+- A short wire or antenna connected to GPIO0 for signal transmission (keep it short to limit range and comply with regulations).
+- Optional: An FM radio receiver for testing reception.
 
-- **Configuring I2S for APLL MCLK:** In the code, the I2S peripheral is initialized in TX master mode, but we don’t actually send any meaningful audio data out – we only care about the clock. The important config is setting ```.use_apll = true``` and specifying ```.fixed_mclk = FM_CARRIER_HZ``` (which is 100,000,000 Hz in our case). According to Espressif’s documentation, when ```use_apll``` is true and ```fixed_mclk``` is set, the I2S driver will configure the APLL to produce that exact MCLK frequency. In other words, we request a 100 MHz clock and the ESP32’s I2S/APLL system takes care of tuning the PLL to achieve it (under the hood, it’s doing essentially the same calculation described in the APLL section).
+### Software
+- ESP-IDF v5.5.1 or compatible (tested with this version).
+- Compiler and build tools for ESP32 (e.g., via ESP-IDF setup).
+- No external libraries beyond ESP-IDF are required.
 
-- **Routing MCLK to a GPIO:** By default, the I2S MCLK might not be output to a pin until we route it. The code uses ```PIN_FUNC_SELECT``` and some register settings to map the I2S0 MCLK signal to a physical GPIO (GPIO0 in this project). Specifically, it selects the function “CLK_OUT1” on GPIO0 and configures the ```CLK_OUT1``` source to be I2S0 MCLK (by writing 0 to the CLK_OUT1 field of the PIN_CTRL register). After this, we set GPIO0 as an output. The result is that **GPIO0 now continuously outputs a square wave at 100 MHz** (the I2S MCLK). This is our unmodulated carrier. A short piece of wire on GPIO0 can act as a very low-power antenna to broadcast the signal to a short distance.
+### Limitations
+- Transmission power is very low (microwatts), resulting in a range of only a few meters.
+- Only supports mono, 8-bit PCM audio at fixed sample rates (e.g., 8 kHz in the example).
+- Not suitable for production broadcasting; intended for learning and prototyping.
 
-## Frequency Modulation via APLL Adjustments
-With a 100 MHz carrier being output, the next step is to **modulate** it with audio. Frequency Modulation
-means we vary the carrier frequency slightly up and down in proportion to the audio waveform.
-Achieving this on the ESP32 is done by dynamically tweaking the APLL frequency on the fly:
+## Installation
 
-- **Calculating Deviation Steps:** The code defines a maximum frequency deviation ```MAX_DEV_HZ``` (in our case 62,000 Hz, approximately ±62 kHz). In commercial FM broadcast, ±75 kHz is the standard max deviation for full modulation, so 62 kHz is a bit lower (possibly chosen for safety or hardware limitation reasons). Using the earlier computed ```lsb_hz``` (Hz per PLL LSB step), the code computes ```dev_lsb = round(MAX_DEV_HZ / lsb_hz)``` This tells how many fractional steps correspond to the desired frequency swing. For example, if one LSB ≈152 Hz, to get ±62,000 Hz you need roughly ±407 LSB steps (62000/152 ≈ 408). The code indeed computes and stores this as ```c.dev_lsb```.
+1. Clone the repository:
+   ```
+   git clone https://github.com/hiperiondev/esp32_fm_radio.git
+   cd esp32_fm_radio
+   ```
 
-- **Centering the Frequency:** The carrier’s base frequency is set by ```base_sdm0``` (the 16-bit base fractional value for the PLL to produce exactly 100 MHz). To allow symmetrical modulation up and down, the code ensures that ```base_sdm0``` is not too close to 0 or 65535. If the base value is less than ```dev_lsb```, it adds an offset (essentially shifting the center frequency slightly) so that we can go ±```dev_lsb``` without hitting the 0 or max boundary of the 16-bit range. This is important for frequencies at the low end of the band (e.g., 87 MHz might need such an offset because the natural base_sdm0 could be small). After this, the APLL is initialized with these base coefficients.
+2. Set up ESP-IDF:
+   - Follow the official ESP-IDF getting started guide: [ESP-IDF Programming Guide](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/get-started/index.html).
+   - Ensure your environment is configured for the ESP32 target.
 
-- **High-Speed Timer Interrupt:** To actually perform modulation, an **ESP32 high-resolution timer** is used. The code sets up a periodic timer ( esp_timer ) to trigger an interrupt/callback at 8000 Hz – this is exactly the sample rate of our audio. In the timer callback (marked IRAM_ATTR for speed), the next audio sample is read from the array. This audio is an 8-bit unsigned PCM (values 0–255) of the song. The code subtracts 128 to convert it to a signed value (-128 to +127). This yields the audio amplitude at that sample, where 0 corresponds to no frequency deviation (carrier at base frequency) and ±127 corresponds to maximum negative or positive deviation.
+3. Build the project:
+   ```
+   idf.py build
+   ```
 
-- **Applying the Frequency Change:** The sample (now in range -128 to +127) is scaled by ```dev_lsb```. Essentially: ```delta = (audio_sample * dev_lsb) >> 7```. The ```>>7``` is dividing by 128, which aligns with the max amplitude 127 ~ ```dev_lsb```. In effect, when audio_sample is 127 (max), ```delta``` ≈ + ```dev_lsb```; when -128, delta ≈ - ```dev_lsb```. This ```delta``` is the amount by which we will shift the PLL’s fractional part from the base. The code then calls ```fm_set_deviation(delta)``` which does: ```sdm0 = base_sdm0 + delta```, clamps it between 0 and 65535, and then uses ```clk_ll_apll_set_config(...)``` to update the APLL registers with the new sdm0 (keeping sdm1, sdm2, o_div constant). This directly **nudges the APLL frequency** up or down in proportion to the audio signal at that instant. The PLL reacts almost instantly to the changes (within microseconds), thus modulating the output frequency in realtime.
+4. Flash to the ESP32:
+   ```
+   idf.py -p PORT flash monitor
+   ```
+   Replace `PORT` with your serial port (e.g., `/dev/ttyUSB0`).
 
-This mechanism is effectively performing FM modulation: the instantaneous frequency of the 100 MHz
-output is being shifted slightly higher or lower depending on the input waveform amplitude at each
-moment. A nearby FM radio receiver tuned to ~100 MHz will interpret these frequency changes as the
-original audio.
+5. Tune an FM radio to the configured carrier frequency (default around 100 MHz) and place it near the ESP32 to hear the transmitted audio.
 
-# Audio Source and Preparation
-The project uses a short audio clip (Rick Astley’s "Never Gonna Give You Up") to demo the transmission.
-Key details about the audio handling:
+## How It Works
 
-- **Embedded Audio Data:** Instead of streaming from SD card or external source, the audio is compiled into the firmware. A WAV file (8-bit mono, 8000 Hz) was converted into a C header array ( rickroll.h ). The tool xxd was used to dump the raw PCM bytes of the WAV into a C array format. This makes the audio readily available in memory. At runtime, no file I/O is needed; we just read from the array. The array values range 0–255 (8-bit unsigned samples).
+This section provides a detailed, step-by-step explanation of the system's operation, from frequency generation to audio modulation and signal output. The design relies on the ESP32's clocking and peripheral features to create a modulated RF signal without external RF hardware.
 
-- **Sample Rate and Timer Sync:** The WAV is 8000 samples per second, so the timer is configured to 125 μs period (which is 1/8000 s). This ensures we "play" the samples at the correct speed. If this rate didn’t match, the audio would be distorted (e.g., wrong pitch). The ESP32’s esp_timer is accurate for this purpose. By keeping the modulation update in lockstep with the original sample rate, we preserve the audio timing. Essentially, the ESP32 is acting like it’s **generating an FM radio signal in real-time from PCM data**, similar to how an FM transmitter would take an audio input and modulate a carrier.
+### 1. Carrier Frequency Generation Using APLL
+The core of the transmitter is the ESP32's Audio PLL (APLL), a specialized clock generator that produces high-frequency signals based on the crystal oscillator (typically 40 MHz). The APLL is tuned to output a frequency in the FM band (e.g., 100 MHz) by adjusting internal parameters:
 
-# Output and Antenna Considerations
-Once the system is running, GPIO0 is effectively transmitting a radio signal. Here are some important
-points about the output and its limitations:
+- **APLL Configuration Parameters**:
+  - **Output Divider (o_div)**: Controls the final division of the internal voltage-controlled oscillator (VCO) frequency. Values range from 0 to 31, ensuring the VCO stays between 350 MHz and 500 MHz for stable locking.
+  - **Fractional Multiplier Components (sdm2, sdm1, sdm0)**: These form a 16-bit fractional part added to an integer multiplier (starting from 4). The effective multiplier is `4 + sdm2 + (sdm1 / 256) + (sdm0 / 65536)`.
+  - The output frequency is derived from the crystal frequency divided and multiplied according to these values.
 
-- **Signal Characteristics:** The output is a digital square wave at ~100 MHz that is frequency- modulated. A square wave has many harmonics (odd harmonics at 3x, 5x frequencies etc.), which means the ESP32 is actually emitting not just at 100 MHz but also some energy at 300 MHz, 500 MHz, etc. Ideally, one would use an output filter or at least a small tuned antenna to focus on the fundamental frequency. In practice, a short wire will radiate the strongest at frequencies where its length is a significant fraction of the wavelength. For ~100 MHz, a quarter- wave is about 75 cm. Using a short wire (a few centimeters) will severely limit range (which is good for avoiding interference, but also means you need to be very close to the radio to receive it).
+- **Calculation Process**:
+  - The system calculates the smallest o_div that keeps the VCO in the valid range.
+  - It then computes the integer (sdm2) and fractional (sdm1:sdm0) parts to match the target carrier (e.g., 100 MHz) as closely as possible.
+  - A deviation value is also precomputed, representing how many fractional steps correspond to the maximum frequency swing (e.g., ±75 kHz). This ensures symmetric modulation without overflowing the fractional range.
+  - If the base fractional value is too close to boundaries (0 or 65535), it's adjusted slightly to allow full deviation.
 
-- **Range and Power:** The ESP32’s GPIO is not designed as an RF power amplifier. The transmitted power is very low (likely in the microwatt range), and the range might be only a few meters at best with a short wire. This is fine for demonstration and keeps within what is generally permissible as unintentional radiator emissions. It’s effectively a **very low-power micro FM transmitter**. One should still be cautious and use it only in a controlled environment, as broadcasting on FM frequencies without a license can be illegal if power or range is significant. In our case, the range is minimal.
+- **Initialization**:
+  - The APLL is enabled and programmed with these coefficients.
+  - The produced frequency is logged, along with any minor error (typically under 100 Hz).
 
-- **Hardware Requirements:** This project specifically requires the original ESP32 chip (ESP32 D0WD, e.g., found in WROOM/WROVER modules) because it has the APLL feature. The newer variants like ESP32-S2, S3, C3 do **not** have the APLL hardware, so they cannot generate an arbitrary high-frequency MCLK like this. The code even explicitly errors out at compile time if not on an ESP32 original, noting that those series don’t possess APLL. Therefore, one must use an ESP32 (original series) for this to work. Also, using GPIO0 as the output pin is convenient on dev boards, but remember GPIO0 is a strapping pin (it selects boot mode at reset). This means you should avoid forcing GPIO0 low at reset, or the ESP32 might not boot. In our use, once running, GPIO0 is set as an output driving the RF signal.
+This setup creates a stable, unmodulated carrier wave.
 
-- **Stability:** The APLL provides a fairly stable frequency with low jitter (it’s meant for audio clocks). By using it, we get a cleaner tone than, say, trying to bit-bang or use a generic PWM. According to some experiments, the APLL-based MCLK has low jitter and can produce a clean carrier . This ensures our FM signal has decent sound quality (as good as 8 kHz mono allows) without excessive noise. The stability was also aided by using the high-res timer for updates. If the timing or PLL update was inconsistent, it would introduce noise or distortion in the received audio.
+### 2. I2S Peripheral Setup for Clock Output
+The I2S peripheral is configured to use the APLL as its clock source and generate a master clock (MCLK) at the carrier frequency:
+
+- **I2S Configuration**:
+  - Operates in transmit (TX) master mode.
+  - Clock source set to APLL.
+  - Sample rate matches the audio (e.g., 8 kHz), but no actual data is transmitted—only the clock is used.
+  - MCLK is routed to GPIO0 via pin multiplexing (CLK_OUT1 signal).
+
+- **Output Routing**:
+  - GPIO0 is set to output mode.
+  - The MCLK signal (carrier wave) is continuously emitted as a square wave on this pin.
+  - A short antenna wire on GPIO0 radiates the signal weakly.
+
+This turns GPIO0 into the RF output port.
+
+### 3. Audio Processing and Modulation
+Audio is modulated onto the carrier using a polar modulation approach, converting amplitude variations into phase and amplitude changes:
+
+- **Audio Source**:
+  - Embedded as an 8-bit unsigned PCM array (e.g., a looped song clip at 8 kHz).
+  - Samples are read sequentially and converted to signed values (-128 to 127).
+
+- **Processing Pipeline**:
+  - **Filters**: High-pass (to remove DC), low-pass (to limit bandwidth, e.g., 3-3.4 kHz), and passband shaping.
+  - **AGC**: Dynamically adjusts gain to normalize levels, detecting high/low/silent audio and updating every 25 ms.
+  - **Limiter**: Soft compression to prevent clipping.
+  - **Hilbert Transform**: Generates in-phase (I) and quadrature (Q) components for phase calculation.
+  - **CORDIC Algorithm**: Computes amplitude and phase from I/Q.
+  - **Mode-Specific Modulation**:
+    - For FM: Phase difference drives frequency shifts; amplitude is fixed.
+    - Deviation scaled per mode (e.g., 2.5 kHz for narrow FM, 75 kHz for wide).
+  - Special test modes generate tones or patterns for debugging.
+
+- **Timer-Driven Modulation**:
+  - A high-resolution timer interrupts at the audio sample rate (e.g., every 125 μs).
+  - In the callback, the next sample is processed through the pipeline.
+  - The computed phase difference is scaled to fractional APLL steps.
+  - The APLL's fractional registers are updated dynamically, shifting the carrier frequency proportionally to the audio.
+
+This real-time update modulates the output signal.
+
+### 4. Signal Transmission and Reception
+- The modulated square wave on GPIO0 includes harmonics, but the fundamental frequency carries the FM signal.
+- A nearby FM receiver decodes the frequency variations as audio.
+- Range is limited due to low power; extend cautiously with better antennas.
+
+### 5. Status and Debugging
+- Logs show APLL config, produced frequency, and errors.
+- Flags track AGC state, audio levels, and overflows.
+
+## API Documentation
+
+### From `polar_mod.h`
+
+#### Enumerations
+- `polar_status_e`: Flags for modulator state (e.g., `PTT_ACTIVE`, `AUDIO_SILENCE`).
+- `modulation_mode_t`: Modulation types (e.g., `MOD_FM` for standard FM, `MOD_FMW` for wide FM).
+- `special_modulation_t`: Test signals (e.g., `SPECIAL_MODULATION_2_TONE_SIG`).
+- `filter_pre_lp_t`, `filter_pre_hp_t`, `filter_pre_pb_t`, `filter_post_lp_t`: Filter options (e.g., `FILTER_LP_3000_4pol` for 4-pole 3 kHz low-pass).
+- `agc_type_t`: AGC modes (e.g., `AGC_NORMAL`).
+
+#### Structures
+- `polar_mod_ctx_t`: Internal state (gain, delays, counters).
+- `modulation_t`: Configuration (mode, filters, AGC, status).
+
+#### Functions
+- `void polar_mod_init(polar_mod_ctx_t *ctx)`: Resets context to defaults (gain=1000, zeros delays).
+- `int modulation_am_pm(polar_mod_ctx_t *ctx, modulation_t modulation, int data, int *ampl_out, int *phase_diff_out)`: Processes one sample through filters/AGC/limiter/Hilbert/CORDIC. Outputs amplitude and phase diff. Returns 0 on success, -1 on error.
+
+### From `esp32_tx.h`
+
+#### Structures
+- `apll_cfg_t`: APLL params (o_div, sdm2, base_frac16, dev_frac16, is_rev0).
+- `tx_cfg_t`: Transmitter settings (carrier_hz, max_dev_hz, wav_sr_hz, modulation_gain).
+- `wav_t`: Audio buffer (audio pointer, length).
+- `tx_ctx_t`: Full context (tx_cfg, apll_cfg, polar_mod_ctx, modulation, wav).
+
+#### Functions
+- `void fm_i2s_init(tx_ctx_t tx_ctx)`: Sets up I2S TX with APLL clock at audio sample rate.
+- `bool fm_apll_init(tx_ctx_t *tx_ctx)`: Computes and programs APLL for carrier/deviation. Returns true on success.
+- `void fm_route_to_pin(void)`: Maps MCLK to GPIO0 as output.
+- `void fm_start_audio(tx_ctx_t *tx_ctx)`: Starts timer for audio modulation updates.
+
+## Example of Use
+
+### Basic Main Function (`main.c`)
+```c
+#include "esp32_tx.h"
+#include "polar_mod.h"
+
+// Example embedded audio (replace with your PCM array)
+extern const unsigned char audio_data[];
+extern const unsigned int audio_len;
+
+void app_main(void) {
+    tx_ctx_t ctx = {0};
+
+    // Configure transmitter
+    ctx.tx_cfg.carrier_hz = 100000000;  // 100 MHz
+    ctx.tx_cfg.max_dev_hz = 75000;      // ±75 kHz deviation
+    ctx.tx_cfg.wav_sr_hz = 8000;        // 8 kHz sample rate
+    ctx.tx_cfg.modulation_gain = 1;     // Default gain
+
+    // Set audio
+    ctx.wav.audio = audio_data;
+    ctx.wav.audio_len = audio_len;
+
+    // Set modulation (FM wide)
+    ctx.modulation.modulation_mode = MOD_FMW;
+    ctx.modulation.filter_pre_hp = FILTER_HP_300_2pol;
+    ctx.modulation.filter_pre_lp = FILTER_LP_3400_4pol;
+    ctx.modulation.filter_pre_pb = FILTER_PB_NONE;
+    ctx.modulation.filter_post_lp = FILTER_POST_LP_3400_4pol;
+    ctx.modulation.agc_type = AGC_NORMAL;
+    ctx.modulation.special_modulation = SPECIAL_MODULATION_NORMAL;
+    ctx.modulation.polar_status = 0;
+
+    // Initialize modulator
+    polar_mod_init(&ctx.polar_mod_ctx);
+
+    // Setup hardware
+    fm_apll_init(&ctx);
+    fm_i2s_init(ctx);
+    fm_route_to_pin();
+    fm_start_audio(&ctx);
+
+    // Run indefinitely
+    while (1) {
+        vTaskDelay(1000 / portTICK_PERIOD_MS);
+    }
+}
+```
+
+### Steps
+1. Include headers and define audio array.
+2. Set up `tx_ctx_t` with desired frequency, deviation, and modulation.
+3. Initialize and start components.
+4. Build/flash as described in Installation.
+5. Tune radio to 100 MHz to hear audio.
+
+## Troubleshooting
+- No signal: Check GPIO0 connection and radio proximity.
+- Distorted audio: Verify sample rate matches audio.
+- APLL failure: Ensure frequency in range; check logs.
+
+## License
+MIT License. See LICENSE file for details.
+
+## Credits
+- Inspired by ESP32 FM projects from Alexxdal and dg6rs.
+- Developed by Emiliano Gonzalez.
