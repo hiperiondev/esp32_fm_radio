@@ -1,8 +1,34 @@
 /*
- * polar_mod.c
+ * Copyright 2025 Emiliano Gonzalez (egonzalez . hiperion @ gmail . com))
+ * * Project Site: https://github.com/hiperiondev/esp32_fm_radio *
  *
- *  Created on: 23.09.2022
- *      Author: georg: https://gitlab.com/dg6rs/polar
+ * This is based on other projects:
+ *    ESP32 as FM radio transmitter: https://github.com/Alexxdal/ESP32FMRadio
+ *    SSB/CW/FM signal generator 35 - 4400MHz: https://gitlab.com/dg6rs/polar
+ *
+ *    please contact their authors for more information.
+ *
+ * The MIT License (MIT)
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining
+ * a copy of this software and associated documentation files (the
+ * "Software"), to deal in the Software without restriction, including
+ * without limitation the rights to use, copy, modify, merge, publish,
+ * distribute, sublicense, and/or sell copies of the Software, and to
+ * permit persons to whom the Software is furnished to do so, subject to
+ * the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be
+ * included in all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+ * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+ * LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+ * OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+ * WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ *
  */
 
 // AGC2 test (Feb 2023):
@@ -12,14 +38,16 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "polar_mod.h"
 
 // This function is called every sample, it outputs a multiplier for the ADC samples to get the peaks of the "ampl" value to or near 65536
 // gain_value: gain with 8 bits after the decimal, i.e. 256 -> gain=1  or 1024 -> gain=4
 // ampl: polar output amplitude (assumed 16 bit, so 0...65536)
-static int mic_agc_fast(int ampl, uint32_t polar_status) {
-    static int gain_value = 1000; // start value: gain=1, 8 bits after the comma, so 256 corresponds to a gain of 1.0
+static int mic_agc_fast(polar_mod_ctx_t *ctx, int ampl, uint32_t polar_status) {
+/*
+ static int gain_value = 1000; // start value: gain=1, 8 bits after the comma, so 256 corresponds to a gain of 1.0
     static int max_ampl = 0;
     static int n = 0;
     static int cnt_high_volume_peaks = 0;
@@ -28,70 +56,70 @@ static int mic_agc_fast(int ampl, uint32_t polar_status) {
 #endif
     static int cnt_low_volume_event = 0;
     static int cnt_no_volume_event = 0;
-
+*/
     int flag_agc_active;
 
     flag_agc_active = ((polar_status & PTT_ACTIVE) || (polar_status & AGC_TRAINING)) && (!(polar_status & AGC_FROZEN)); // self explanatory, obviously
 
-    if ((ampl > max_ampl) && flag_agc_active)
-        max_ampl = ampl; // find max peak amplitude
+    if ((ampl > ctx->max_ampl) && flag_agc_active)
+         ctx->max_ampl = ampl; // find max peak amplitude
     if ((ampl > HIGH_VOL_THRES) && flag_agc_active)
-        cnt_high_volume_peaks++; // how often the max volume is exceeded?
+         ctx->cnt_high_volume_peaks++; // how often the max volume is exceeded?
 
-    n++;
+     ctx->n++;
 
     // every x samples (=25ms at 16kSps)
-    if (n > 400) {
-        n = 0; // reset counter
+    if ( ctx->n > 400) {
+         ctx->n = 0; // reset counter
 
-        if (cnt_high_volume_peaks > 3)                                // more than 3 peaks happened ?
-            gain_value = gain_value - (gain_value >> STEP_DOWN_SIZE); // reduce gain
+        if ( ctx->cnt_high_volume_peaks > 3)                                // more than 3 peaks happened ?
+             ctx->gain_value =  ctx->gain_value - ( ctx->gain_value >> STEP_DOWN_SIZE); // reduce gain
 
-        if ((max_ampl < NO_VOL_THRES) && flag_agc_active)
-            cnt_no_volume_event++;
+        if (( ctx->max_ampl < NO_VOL_THRES) && flag_agc_active)
+             ctx->cnt_no_volume_event++;
         else
-            cnt_no_volume_event = 0;
+             ctx->cnt_no_volume_event = 0;
 
-        if ((max_ampl < LOW_VOL_THRES) && (max_ampl > NO_VOL_THRES) && flag_agc_active)
-            cnt_low_volume_event++;
-        if ((max_ampl > LOW_VOL_THRES) && flag_agc_active)
-            cnt_low_volume_event = 0; // only a loud event resets counter // a "no sound" event does not
+        if (( ctx->max_ampl < LOW_VOL_THRES) && ( ctx->max_ampl > NO_VOL_THRES) && flag_agc_active)
+             ctx->cnt_low_volume_event++;
+        if (( ctx->max_ampl > LOW_VOL_THRES) && flag_agc_active)
+             ctx->cnt_low_volume_event = 0; // only a loud event resets counter // a "no sound" event does not
 
-        if (cnt_no_volume_event > 10)
-            cnt_low_volume_event = 10; // if there was quite some "no volume" in a row, then put back the low-volume counter to half the way, so it would not
+        if ( ctx->cnt_no_volume_event > 10)
+             ctx->cnt_low_volume_event = 10; // if there was quite some "no volume" in a row, then put back the low-volume counter to half the way, so it would not
                                        // happen that "almost no sound" for a while pushes up the gain too much
 
-        // more than x times in a row , use quite some delay so a word not that loud does not immeadiately pushes up the gain
-        if (cnt_low_volume_event > 20) {
-            gain_value = gain_value + (gain_value >> STEP_UP_SIZE); // increase gain
+        // more than x times in a row , use quite some delay so a word not that loud does not immediately pushes up the gain
+        if ( ctx->cnt_low_volume_event > 20) {
+            ctx-> gain_value =  ctx->gain_value + ( ctx->gain_value >> STEP_UP_SIZE); // increase gain
             polar_status |= AUDIO_LOW;
         } else {
             polar_status &= ~AUDIO_LOW; // Hmm... it's still quiet, even if the gain isn't increased!?
         }
 
         // more than 5 times in a row
-        if (cnt_no_volume_event > 5) {
+        if ( ctx->cnt_no_volume_event > 5) {
             polar_status |= AUDIO_SILENCE; // what else to do?
         } else {
             polar_status &= ~AUDIO_SILENCE; // what else to do?
         }
 
-        if (gain_value < 64) {
-            gain_value = 64; // smallest gain value: 0.25 (64/256) // what else to do?
+        if ( ctx->gain_value < 64) {
+             ctx->gain_value = 64; // smallest gain value: 0.25 (64/256) // what else to do?
         }
 
-        if (gain_value > (1 << 15)) {
-            gain_value = 1 << 15; // highest gain value: 1<<5 (32) i.e. needs ca. 1/32 /ca. -30dB) of full swing for full scale // what else ?
+        if ( ctx->gain_value > (1 << 15)) {
+             ctx->gain_value = 1 << 15; // highest gain value: 1<<5 (32) i.e. needs ca. 1/32 /ca. -30dB) of full swing for full scale // what else ?
         }
 
-        max_ampl = 0; // reset max value search
-        cnt_high_volume_peaks = 0;
+         ctx->max_ampl = 0; // reset max value search
+         ctx->cnt_high_volume_peaks = 0;
 
         // ADC gain (overdrive, underdrive too?): extra function? or converting AGC gain back to the ADC range. What about audio midlevel?
         // How can I display it properly?
     }
 
-    return gain_value;
+    return  ctx->gain_value;
 }
 
 // Soft limiter
@@ -241,15 +269,16 @@ static int filter_2pol_lowpass_3400hz(int x, int *delay) {
 // sos_hp_1p_500 =
 //         1.00000  -1.00000   0.00000   1.00000  -0.82068   0.00000
 // g_hp_1p_500 =  0.91034
-static int filter_1pol_highpass_500hz(int x) {
+static int filter_1pol_highpass_500hz(polar_mod_ctx_t *ctx, int x) {
     int stage1;
     // int stage2;
-    static int delay_s1[2] = {
-        0, //
-        0  //
-    };
+    //static int delay_s1[2] = {
+    //    0, //
+    //    0  //
+    //};
 
-    stage1 = biquad_b2zero(x, -(1 << 16), -53784, 0, delay_s1); // b1,a1,a2
+    stage1 = biquad_b2zero(x, -(1 << 16), -53784, 0, ctx->delay_s1); // b1,a1,a2
+
     // ignore g here, as it is close to one
     stage1 = stage1 + 0; // Manually calculate the DC offset of the high pass -> leave it as it is?
     return stage1;
@@ -260,11 +289,11 @@ static int filter_1pol_highpass_500hz(int x) {
 // sos_hp_1p_1000 =
 //        1.00000  -1.00000   0.00000   1.00000  -0.66818   0.00000
 // g_hp_1p_1000 =  0.83409
-static int filter_1pol_highpass_1000hz(int x) {
+static int filter_1pol_highpass_1000hz(polar_mod_ctx_t *ctx, int x) {
     int stage1;
-    static int delay_s1[2] = { 0, 0 };
+    //static int delay_s1[2] = { 0, 0 };
 
-    stage1 = biquad_b2zero(x, -(1 << 16), -43790, 0, delay_s1); // b1,a1,a2
+    stage1 = biquad_b2zero(x, -(1 << 16), -43790, 0, ctx->delay_s1); // b1,a1,a2
     // ignore g here, as it is close to one
     stage1 = stage1 + 0; // manually calculate the DC offset of the high pass -> leave it like that?
     return stage1;
@@ -275,11 +304,11 @@ static int filter_1pol_highpass_1000hz(int x) {
 // sos_hp_1p_2000 =
 //       1.00000  -1.00000   0.00000   1.00000  -0.41421   0.00000
 // g_hp_1p_2000 =  0.70711
-static int filter_1pol_highpass_2000hz(int x) {
+static int filter_1pol_highpass_2000hz(polar_mod_ctx_t *ctx, int x) {
     int stage1;
-    static int delay_s1[2] = { 0, 0 };
+   // static int delay_s1[2] = { 0, 0 };
 
-    stage1 = biquad_b2zero(x, -(1 << 16), -27146, 0, delay_s1); // b1,a1,a2
+    stage1 = biquad_b2zero(x, -(1 << 16), -27146, 0, ctx->delay_s1); // b1,a1,a2
     // ignore g here, as it is close to one
     // stage1=stage1+0; // manually calculate the DC offset of the high pass -> it is virtually zero
     return stage1;
@@ -291,16 +320,16 @@ static int filter_1pol_highpass_2000hz(int x) {
 //        1.00000  -2.00000   1.00000   1.00000  -1.85908   0.86482
 //        1.00000  -2.00000   1.00000   1.00000  -1.93571   0.94170
 // g =  0.90244
-static int filter_4pol_highpass_200hz(int x) {
+static int filter_4pol_highpass_200hz(polar_mod_ctx_t *ctx, int x) {
     int stage1;
     int stage2;
-    static int delay_s1[2] = { 0, 0 };
-    static int delay_s2[2] = { 0, 0 };
+    //static int delay_s1[2] = { 0, 0 };
+    //static int delay_s2[2] = { 0, 0 };
 
-    stage1 = biquad(x, -(2 << 16), -121837, 56677, delay_s1);      // b1,a1,a2
-    stage2 = biquad(stage1, -(2 << 16), -126859, 61715, delay_s2); // b1,a1,a2
+    stage1 = biquad(x, -(2 << 16), -121837, 56677, ctx->delay_s1);      // b1,a1,a2
+    stage2 = biquad(stage1, -(2 << 16), -126859, 61715, ctx->delay_s2); // b1,a1,a2
     // ignore g here, as it is close to one
-    stage2 = stage2 + 168; // TODO: manuell den DC Offset des Hochpass raus rechnen -> das so lassen !?!??!
+    stage2 = stage2 + 168; // TODO: manually calculate the DC offset of the high pass -> leave it like that?
     return stage2;
 }
 
@@ -310,14 +339,14 @@ static int filter_4pol_highpass_200hz(int x) {
 //        1.00000  -2.00000   1.00000   1.00000  -1.79159   0.80409
 //        1.00000  -2.00000   1.00000   1.00000  -1.90065   0.91391
 // g_hp_4p_300 =  0.85725
-static int filter_4pol_highpass_300hz(int x) {
+static int filter_4pol_highpass_300hz(polar_mod_ctx_t *ctx, int x) {
     int stage1;
     int stage2;
-    static int delay_s1[2] = { 0, 0 };
-    static int delay_s2[2] = { 0, 0 };
+   // static int delay_s1[2] = { 0, 0 };
+   // static int delay_s2[2] = { 0, 0 };
 
-    stage1 = biquad(x, -(2 << 16), -117414, 52697, delay_s1);      // b1,a1,a2
-    stage2 = biquad(stage1, -(2 << 16), -124561, 59894, delay_s2); // b1,a1,a2
+    stage1 = biquad(x, -(2 << 16), -117414, 52697, ctx->delay_s1);      // b1,a1,a2
+    stage2 = biquad(stage1, -(2 << 16), -124561, 59894, ctx->delay_s2); // b1,a1,a2
     // ignore g here, as it is close to one
     stage2 = stage2 + 75; // manually calculate the DC offset of the high pass -> leave it like that?
     return stage2;
@@ -328,12 +357,12 @@ static int filter_4pol_highpass_300hz(int x) {
 // sos_hp_2p_300 =
 //         1.00000  -2.00000   1.00000   1.00000  -1.83373   0.84653
 // g_hp_2p_300 =  0.92007
-static int filter_2pol_highpass_300hz(int x) {
+static int filter_2pol_highpass_300hz(polar_mod_ctx_t *ctx, int x) {
     int stage1;
     // int stage2;
-    static int delay_s1[2] = { 0, 0 };
+    //static int delay_s1[2] = { 0, 0 };
 
-    stage1 = biquad(x, -(2 << 16), -120175, 55478, delay_s1); // b1,a1,a2
+    stage1 = biquad(x, -(2 << 16), -120175, 55478, ctx->delay_s1); // b1,a1,a2
     // ignore g here, as it is close to one
     stage1 = stage1 + 78; // manually calculate the DC offset of the high pass -> leave it like that?
     return stage1;
@@ -363,9 +392,9 @@ static int allpass(int x, int coeff, int *delay) {
 // https://www.mikrocontroller.net/topic/92630#839661  (https://www.mikrocontroller.net/attachment/33904/hilbert_Olli_Niemitalo.pdf )
 // https://web.archive.org/web/20070814013543/
 // http://yehar.com/ViewHome.pl?page=dsp/hilbert/011729.html
-static void hilbert(int sample_in, int *i_out, int *q_out) {
+static void hilbert(polar_mod_ctx_t *ctx, int sample_in, int *i_out, int *q_out) {
     int i1, i2, i3, q1, q2, q3;
-    // delay storage
+    /* delay storage
     static int delay_i0 = 0;           // inphase Z^-1 block
     static int delay_i1[2] = { 0, 0 }; // inphase 1. block
     static int delay_i2[2] = { 0, 0 }; // inphase 2. block
@@ -375,20 +404,21 @@ static void hilbert(int sample_in, int *i_out, int *q_out) {
     static int delay_q2[2] = { 0, 0 }; // quadrature 2.block
     static int delay_q3[2] = { 0, 0 }; // quadrature 3.block
     static int delay_q4[2] = { 0, 0 }; // quadrature 4.block
+*/
 
     // inphase 1. to 4. Block
-    i1 = allpass(delay_i0, 31418, delay_i1); // coeff = ( ( 0.6923877778065 ) ^ 2 ) << 16
-    i2 = allpass(i1, 57434, delay_i2);       // coeff = ( ( 0.9360654322959 ) ^ 2 ) << 16
-    i3 = allpass(i2, 64002, delay_i3);       // coeff = ( ( 0.9882295226860 ) ^ 2 ) << 16
-    *i_out = allpass(i3, 65372, delay_i4);   // coeff = ( ( 0.9987488452737 ) ^ 2 ) << 16
+    i1 = allpass(ctx->delay_i0, 31418, ctx->delay_i1); // coeff = ( ( 0.6923877778065 ) ^ 2 ) << 16
+    i2 = allpass(i1, 57434, ctx->delay_i2);       // coeff = ( ( 0.9360654322959 ) ^ 2 ) << 16
+    i3 = allpass(i2, 64002, ctx->delay_i3);       // coeff = ( ( 0.9882295226860 ) ^ 2 ) << 16
+    *i_out = allpass(i3, 65372, ctx->delay_i4);   // coeff = ( ( 0.9987488452737 ) ^ 2 ) << 16
     // inphase Z^-1 block
-    delay_i0 = sample_in;
+    ctx->delay_i0 = sample_in;
 
     // quadrature 1. to 4. Block
-    q1 = allpass(sample_in, 10601, delay_q1); // coeff = ( ( 0.4021921162426 ) ^ 2 ) << 16
-    q2 = allpass(q1, 48040, delay_q2);        // coeff = ( ( 0.8561710882420 ) ^ 2 ) << 16
-    q3 = allpass(q2, 61954, delay_q3);        // coeff = ( ( 0.9722909545651 ) ^ 2 ) << 16
-    *q_out = allpass(q3, 64920, delay_q4);    // coeff = ( ( 0.9952884791278 ) ^ 2 ) << 16
+    q1 = allpass(sample_in, 10601, ctx->delay_q1); // coeff = ( ( 0.4021921162426 ) ^ 2 ) << 16
+    q2 = allpass(q1, 48040, ctx->delay_q2);        // coeff = ( ( 0.8561710882420 ) ^ 2 ) << 16
+    q3 = allpass(q2, 61954, ctx->delay_q3);        // coeff = ( ( 0.9722909545651 ) ^ 2 ) << 16
+    *q_out = allpass(q3, 64920, ctx->delay_q4);    // coeff = ( ( 0.9952884791278 ) ^ 2 ) << 16
 }
 
 // Cordic
@@ -595,26 +625,26 @@ static int table_2_tone_y[LOOKUP_SIZE] = {
 
 // all frequency values rely on 16kSps
 // not in the .h file: only used internally
-static void iq_signal_generator(int mode, int *x, int *y) {
-    static unsigned int last_mode = 555; // dummy value
-    static unsigned int counter = 0;
+static void iq_signal_generator(polar_mod_ctx_t *ctx, int mode, int *x, int *y) {
+    //static unsigned int last_mode = 555; // dummy value
+    //static unsigned int counter = 0;
 
     // reset counter when mode changes
-    if (last_mode != mode) {
-        last_mode = mode;
-        counter = 0;
+    if (ctx->last_mode != mode) {
+        ctx->last_mode = mode;
+        ctx->counter = 0;
     }
 
-    counter++;
-    if (counter >= LOOKUP_SIZE)
-        counter = 0;
+    ctx->counter++;
+    if (ctx->counter >= LOOKUP_SIZE)
+        ctx->counter = 0;
 
     if (mode == SPECIAL_MODULATION_2_TONE_SIG_IQ) {
-        *x = table_2_tone_x[counter];
-        *y = table_2_tone_y[counter];
+        *x = table_2_tone_x[ctx->counter];
+        *y = table_2_tone_y[ctx->counter];
     } else if (mode == SPECIAL_MODULATION_3_TONE_SIG_IQ) {
-        *x = table_3_tone_x[counter];
-        *y = table_3_tone_y[counter];
+        *x = table_3_tone_x[ctx->counter];
+        *y = table_3_tone_y[ctx->counter];
     } else {
         *x = 0;
         *y = 0;
@@ -627,10 +657,11 @@ static void iq_signal_generator(int mode, int *x, int *y) {
 // data: audio data input
 // ampl_out: linear amplitude output. TODO: give gain of amplitude between in and out
 // phase_diff_out: phase difference to last phase. Value of 2^24 = 16777216 corresponds to 360°. Output range: -180...+180°  or -90°...+90° ?!??!
-int modulation_am_pm(modulation_t modulation, int data, int *ampl_out, int *phase_diff_out) {
+int modulation_am_pm(polar_mod_ctx_t *ctx, modulation_t modulation, int data, int *ampl_out, int *phase_diff_out) {
     if (!ampl_out || !phase_diff_out)
         return -1;
 
+/*
     // each filter needs its private storage to be able to reuse the function
     static int delay_lp_adc[4] = {
         0, //
@@ -657,62 +688,62 @@ int modulation_am_pm(modulation_t modulation, int data, int *ampl_out, int *phas
         0  //
     };
     static int agc_gain = 256; // needs to be remembered from last call, start value is a dummy, just for the first audio sample
-
+*/
     int data_2, data_3, data_4, data_5;
     int x, y;
     int ampl;
     int angle;
     int angle_diff = 0;
-    static int last_angle;
+   // static int last_angle;
 
     // highpass, also removes DC bias
     switch (modulation.filter_pre_hp) {
         case FILTER_HP_200_4pol:
-            data_2 = filter_4pol_highpass_200hz(data); // highpass is only called once, so the storage of the state can be internal
+            data_2 = filter_4pol_highpass_200hz(ctx, data); // highpass is only called once, so the storage of the state can be internal
             break;
         case FILTER_HP_300_4pol:
-            data_2 = filter_4pol_highpass_300hz(data);
+            data_2 = filter_4pol_highpass_300hz(ctx, data);
             break;
         case FILTER_HP_300_2pol:
         default:
-            data_2 = filter_2pol_highpass_300hz(data);
+            data_2 = filter_2pol_highpass_300hz(ctx, data);
     }
     data_2 = data_2 << 1;
 
     // general lowpass filter for the mic audio
     switch (modulation.filter_pre_lp) {
         case FILTER_LP_3400_2pol:
-            data_3 = filter_2pol_lowpass_3400hz(data_2, delay_lp_adc);
+            data_3 = filter_2pol_lowpass_3400hz(data_2, ctx->delay_lp_adc);
             break;
         case FILTER_LP_3400_4pol:
-            data_3 = filter_4pol_lowpass_3400hz(data_2, delay_lp_adc);
+            data_3 = filter_4pol_lowpass_3400hz(data_2, ctx->delay_lp_adc);
             break;
         case FILTER_LP_3000_4pol:
-            data_3 = filter_4pol_lowpass_3000hz(data_2, delay_lp_adc);
+            data_3 = filter_4pol_lowpass_3000hz(data_2, ctx->delay_lp_adc);
             break;
         case FILTER_LP_3000_2pol:
-            data_3 = filter_2pol_lowpass_3000hz_bessel(data_2, delay_lp_adc);
+            data_3 = filter_2pol_lowpass_3000hz_bessel(data_2, ctx->delay_lp_adc);
             break;
         default:
-            data_3 = filter_4pol_lowpass_3400hz(data_2, delay_lp_adc);
+            data_3 = filter_4pol_lowpass_3400hz(data_2, ctx->delay_lp_adc);
     }
     data_3 = data_3 << 1;
 
     // shape passband 300-3000Hz
     switch (modulation.filter_pre_pb) {
         case FILTER_PB_500:
-            data_3 = filter_1pol_highpass_500hz(data_3); // highpass is only called once, so the storage of the state can be internal
+            data_3 = filter_1pol_highpass_500hz(ctx, data_3); // highpass is only called once, so the storage of the state can be internal
             break;
         case FILTER_PB_2k:
-            data_3 = filter_1pol_highpass_2000hz(data_3);
+            data_3 = filter_1pol_highpass_2000hz(ctx, data_3);
             break;
         case FILTER_PB_NONE:
             break; // no filter
         case FILTER_PB_1k:
-            data_3 = filter_1pol_highpass_1000hz(data_3);
+            data_3 = filter_1pol_highpass_1000hz(ctx, data_3);
             break;
         default:
-            data_3 = filter_1pol_highpass_2000hz(data_3);
+            data_3 = filter_1pol_highpass_2000hz(ctx, data_3);
             break;
     }
     data_3 = data_3 << 1;
@@ -725,47 +756,47 @@ int modulation_am_pm(modulation_t modulation, int data, int *ampl_out, int *phas
             break;
         case AGC_GAIN_CHANGE:
             // use AGC, but change gain / scaling. Corresponds to gain is equal / 0x220 -> gain is doubled
-            data_4 = (data_3 * agc_gain * ((0x200 & 0xff))) >> 4;
+            data_4 = (data_3 * ctx->agc_gain * ((0x200 & 0xff))) >> 4;
             break;
         case 0: // normal AGC usage
         default:
             // calculate the AGC at a point that no longer has a DC offset (after a high pass). Scaling: agc_gain==256 corresponds to gain==1
-            data_4 = (data_3 * agc_gain) >> 8;
+            data_4 = (data_3 * ctx->agc_gain) >> 8;
             break;
     }
 
     // calc new agc_gain value always according to the signal value the usual AGC usage would have had
-    agc_gain = mic_agc_fast(abs((data_3 * agc_gain) >> 8), modulation.polar_status);
+    ctx->agc_gain = mic_agc_fast(ctx, abs((data_3 * ctx->agc_gain) >> 8), modulation.polar_status);
     data_5 = soft_limiter(data_4);
 
     // low pass filter after soft limiter to avoid increase in high frequency spectrum
     switch (modulation.filter_post_lp) {
         case FILTER_POST_LP_3400_2pol:
-            data_5 = filter_2pol_lowpass_3400hz(data_5, delay_lp_2);
+            data_5 = filter_2pol_lowpass_3400hz(data_5, ctx->delay_lp_2);
             break;
         case FILTER_POST_LP_3400_4pol:
-            data_5 = filter_4pol_lowpass_3400hz(data_5, delay_lp_2);
+            data_5 = filter_4pol_lowpass_3400hz(data_5, ctx->delay_lp_2);
             break;
         case FILTER_POST_LP_3000_2pol:
-            data_5 = filter_2pol_lowpass_3000hz_bessel(data_5, delay_lp_2);
+            data_5 = filter_2pol_lowpass_3000hz_bessel(data_5, ctx->delay_lp_2);
             break;
         case FILTER_POST_LP_NONE:
             break; // no filter
         case FILTER_POST_LP_3000_4pol:
         default:
-            data_5 = filter_2pol_lowpass_3400hz(data_5, delay_lp_2);
+            data_5 = filter_2pol_lowpass_3400hz(data_5, ctx->delay_lp_2);
     }
 
-    hilbert(data_5, &x, &y); // produces an FFT peak at fs/2 due to limit cycles?
+    hilbert(ctx, data_5, &x, &y); // produces an FFT peak at fs/2 due to limit cycles?
 
-    x = filter_2pol_lowpass_3400hz(x, delay_lp_x);
-    y = filter_2pol_lowpass_3400hz(y, delay_lp_y); // Quick fix gegen den Peak bei fs/2
+    x = filter_2pol_lowpass_3400hz(x, ctx->delay_lp_x);
+    y = filter_2pol_lowpass_3400hz(y, ctx->delay_lp_y); // Quick fix gegen den Peak bei fs/2
 
     x = x + 451; // manually calculate the DC offset
     y = y + 98;  // manually calculate the DC offset (new values ​​Feb 2023) -> reduces the DC peak in the FFt only minimally
 
     if ((modulation.special_modulation == SPECIAL_MODULATION_2_TONE_SIG_IQ) || (modulation.special_modulation == SPECIAL_MODULATION_3_TONE_SIG_IQ)) {
-        iq_signal_generator(modulation.special_modulation, &x, &y);
+        iq_signal_generator(ctx, modulation.special_modulation, &x, &y);
     }
 
     cordic(x, y, &ampl, &angle); // x and y (I and Q) -> amplitude and phase
@@ -796,7 +827,7 @@ int modulation_am_pm(modulation_t modulation, int data, int *ampl_out, int *phas
             break;
         case MOD_LSB:
         case MOD_USB:
-            angle_diff = (angle - last_angle); // value of 2^24 = 16777216 corresponds to 360°  // range: -180...+180°
+            angle_diff = (angle - ctx->last_angle); // value of 2^24 = 16777216 corresponds to 360°  // range: -180...+180°
             if (angle_diff > 0x800000)         // > 180°?
                 angle_diff -= 0x1000000;       // 180°...360° -> -180..0°  (unwrap)
             if (angle_diff < -0x800000)        // < -180°?
@@ -819,7 +850,14 @@ int modulation_am_pm(modulation_t modulation, int data, int *ampl_out, int *phas
     }
 
     *phase_diff_out = angle_diff;
-    last_angle = angle;
+    ctx->last_angle = angle;
 
     return 0; // no error
+}
+
+void polar_mod_init(polar_mod_ctx_t *ctx) {
+    memset(ctx, 0, sizeof(polar_mod_ctx_t));
+    ctx->gain_value = 1000; // AGC start value
+    ctx->agc_gain = 256;    // Default gain (1.0)
+    ctx->last_mode = 555;   // Dummy for signal generator
 }

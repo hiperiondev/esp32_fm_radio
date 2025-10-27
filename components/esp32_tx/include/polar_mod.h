@@ -1,8 +1,34 @@
 /*
- * polar_mod.h
+ * Copyright 2025 Emiliano Gonzalez (egonzalez . hiperion @ gmail . com))
+ * * Project Site: https://github.com/hiperiondev/esp32_fm_radio *
  *
- *  Created on: 23.09.2022
- *      Author: georg: https://gitlab.com/dg6rs/polar
+ * This is based on other projects:
+ *    ESP32 as FM radio transmitter: https://github.com/Alexxdal/ESP32FMRadio
+ *    SSB/CW/FM signal generator 35 - 4400MHz: https://gitlab.com/dg6rs/polar
+ *
+ *    please contact their authors for more information.
+ *
+ * The MIT License (MIT)
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining
+ * a copy of this software and associated documentation files (the
+ * "Software"), to deal in the Software without restriction, including
+ * without limitation the rights to use, copy, modify, merge, publish,
+ * distribute, sublicense, and/or sell copies of the Software, and to
+ * permit persons to whom the Software is furnished to do so, subject to
+ * the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be
+ * included in all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+ * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+ * LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+ * OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+ * WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ *
  */
 
 #ifndef POLAR_MOD_H_
@@ -10,16 +36,16 @@
 #include <stdint.h>
 
 // Microphone AGC (automated gain control)
-#define HIGH_VOL_THRES 65000              // threshold for a volume to be loud
-#define LOW_VOL_THRES  HIGH_VOL_THRES / 2 // threshold for a volume to be not loud
-#define NO_VOL_THRES   4096               // threshold for a volume to be almost silent (1/16 of max amplitude, so ca. -24dB)
-#define STEP_DOWN_SIZE 5                  // every step size is 2^^-4  (=6,25%)  -> higher number means lower step size !!
-#define STEP_UP_SIZE   5                  // every step size is 2^^-6  (=1,6%)
+#define HIGH_VOL_THRES (65000)              // threshold for a volume to be loud
+#define LOW_VOL_THRES  (HIGH_VOL_THRES / 2) // threshold for a volume to be not loud
+#define NO_VOL_THRES   (4096)               // threshold for a volume to be almost silent (1/16 of max amplitude, so ca. -24dB)
+#define STEP_DOWN_SIZE (5)                  // every step size is 2^^-4  (=6,25%)  -> higher number means lower step size !!
+#define STEP_UP_SIZE   (5)                  // every step size is 2^^-6  (=1,6%)
 
 enum polar_status_e {
     PTT_ACTIVE = 0x00000001,
     AGC_TRAINING = 0x00000002,   // AGC is active without the PTT
-    AGC_FROZEN = 0x00000004,     // AGC is frozen even if PTT is active (TODO: AGC active or frozen? Which one has priority?!??!)
+    AGC_FROZEN = 0x00000004,     // AGC is frozen even if PTT is active (TODO: AGC active or frozen? Which one has priority?)
     AUDIO_SILENCE = 0x00000008,  // audio input is so low that the output power is deactivated
     AUDIO_LOW = 0x00000010,      // audio level is low (warning for the user)
     AUDIO_MIDLEVEL = 0x00000020, // audio peaks at a medium level (-6dB?!)
@@ -107,16 +133,65 @@ typedef enum AGC_TYPE_E {
 } agc_type_t;
 
 typedef struct {
-    modulation_mode_t modulation_mode;
-    filter_pre_hp_t filter_pre_hp;
-    filter_pre_lp_t filter_pre_lp;
-    filter_pre_pb_t filter_pre_pb;
-    filter_post_lp_t filter_post_lp;
-    agc_type_t agc_type;
-    special_modulation_t special_modulation;
-    uint32_t polar_status;
+    // From mic_agc_fast
+    int gain_value;
+    int max_ampl;
+    int n;
+    int cnt_high_volume_peaks;
+#ifdef DEBUG_PC2_AGC
+    int cnt_high_volume_event;
+#endif
+    int cnt_low_volume_event;
+    int cnt_no_volume_event;
+
+    // From high-pass filters (internal delays)
+    int delay_hp500[2];    // For filter_1pol_highpass_500hz
+    int delay_hp1000[2];   // For filter_1pol_highpass_1000hz
+    int delay_hp2000[2];   // For filter_1pol_highpass_2000hz
+    int delay_hp200_s1[2]; // For filter_4pol_highpass_200hz stage 1
+    int delay_hp200_s2[2]; // For filter_4pol_highpass_200hz stage 2
+    int delay_hp300_s1[2]; // For filter_4pol_highpass_300hz stage 1
+    int delay_hp300_s2[2]; // For filter_4pol_highpass_300hz stage 2
+    int delay_hp300_2p[2]; // For filter_2pol_highpass_300hz
+
+    // From hilbert
+    int delay_i0;
+    int delay_i1[2];
+    int delay_i2[2];
+    int delay_i3[2];
+    int delay_i4[2];
+    int delay_q1[2];
+    int delay_q2[2];
+    int delay_q3[2];
+    int delay_q4[2];
+    int delay_s1[2];
+    int delay_s2[2];
+
+    // From iq_signal_generator
+    unsigned int last_mode;
+    unsigned int counter;
+
+    // From modulation_am_pm
+    int delay_lp_adc[4];
+    int delay_lp_2[4];
+    int delay_lp_x[4];
+    int delay_lp_y[4];
+    int agc_gain;
+    int last_angle;
+} polar_mod_ctx_t;
+
+typedef struct {
+    modulation_mode_t modulation_mode;       //
+    filter_pre_hp_t filter_pre_hp;           //
+    filter_pre_lp_t filter_pre_lp;           //
+    filter_pre_pb_t filter_pre_pb;           //
+    filter_post_lp_t filter_post_lp;         //
+    agc_type_t agc_type;                     //
+    special_modulation_t special_modulation; //
+    uint32_t polar_status;                   //
 } modulation_t;
 
-int modulation_am_pm(modulation_t modulation, int data, int *ampl_out, int *phase_diff_out);
+void polar_mod_init(polar_mod_ctx_t *ctx);
+int modulation_am_pm(polar_mod_ctx_t *ctx, modulation_t modulation, int data, int *ampl_out, int *phase_diff_out);
 
 #endif /* POLAR_MOD_H_ */
