@@ -31,10 +31,6 @@
  *
  */
 
-// AGC2 test (Feb 2023):
-// The AGC receives the level from the first low-pass filter. Then comes the soft limiter, another low-pass filter, and then the Hilbert filter.
-// Unlike before, the Hilbert filter receives the signal that has already passed through the soft limiter.
-
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -42,87 +38,254 @@
 
 #include "polar_mod.h"
 
-// This function is called every sample, it outputs a multiplier for the ADC samples to get the peaks of the "ampl" value to or near 65536
-// gain_value: gain with 8 bits after the decimal, i.e. 256 -> gain=1  or 1024 -> gain=4
-// ampl: polar output amplitude (assumed 16 bit, so 0...65536)
+/**
+ * \def CORDIC_ITERATIONS
+ * Number of iterations for CORDIC algorithm.
+ */
+#define CORDIC_ITERATIONS 8
+
+/**
+ * \def LOOKUP_SIZE
+ * Size of lookup tables for tone signals.
+ */
+#define LOOKUP_SIZE 32
+
+/**
+ * \brief 3-tone X (I) lookup table for test signals.
+ */
+static int table_3_tone_x[LOOKUP_SIZE] = {
+    0,      //
+    14700,  //
+    25483,  //
+    29586,  //
+    26182,  //
+    16573,  //
+    3713,   //
+    -8750,  //
+    -17600, //
+    -20996, //
+    -18915, //
+    -12991, //
+    -5818,  //
+    22,     //
+    2856,   //
+    2454,   //
+    0,      //
+    -2454,  //
+    -2856,  //
+    -22,    //
+    5818,   //
+    12991,  //
+    18915,  //
+    20996,  //
+    17600,  //
+    8750,   //
+    -3713,  //
+    -16573, //
+    -26182, //
+    -29586, //
+    -25483, //
+    -14700  //
+};
+
+/**
+ * \brief 3-tone Y (Q) lookup table for test signals.
+ */
+static int table_3_tone_y[LOOKUP_SIZE] = {
+    30400,  //
+    26516,  //
+    15958,  //
+    1671,   //
+    -12445, //
+    -22704, //
+    -26708, //
+    -23983, //
+    -16000, //
+    -5581,  //
+    4081,   //
+    10459,  //
+    12445,  //
+    10575,  //
+    6669,   //
+    3048,   //
+    1600,   //
+    3048,   //
+    6669,   //
+    10575,  //
+    12445,  //
+    10459,  //
+    4081,   //
+    -5581,  //
+    -16000, //
+    -23983, //
+    -26708, //
+    -22704, //
+    -12445, //
+    1671,   //
+    15958,  //
+    26516   //
+};
+
+/**
+ * \brief 2-tone X (I) lookup table for test signals.
+ */
+static int table_2_tone_x[LOOKUP_SIZE] = {
+    0,      //
+    15012,  //
+    26096,  //
+    30475,  //
+    27314,  //
+    17904,  //
+    5191,   //
+    -7181,  //
+    -16000, //
+    -19426, //
+    -17437, //
+    -11661, //
+    -4686,  //
+    910,    //
+    3468,   //
+    2766,   //
+    0,      //
+    -2766,  //
+    -3468,  //
+    -910,   //
+    4686,   //
+    11661,  //
+    17437,  //
+    19426,  //
+    16000,  //
+    7181,   //
+    -5191,  //
+    -17904, //
+    -27314, //
+    -30475, //
+    -26096, //
+    -15012  //
+};
+
+/**
+ * \brief 2-tone Y (Q) lookup table for test signals.
+ */
+static int table_2_tone_y[LOOKUP_SIZE] = {
+    32000,  //
+    28086,  //
+    17437,  //
+    3001,   //
+    -11314, //
+    -21815, //
+    -26096, //
+    -23671, //
+    -16000, //
+    -5893,  //
+    3468,   //
+    9570,   //
+    11314,  //
+    9244,   //
+    5191,   //
+    1479,   //
+    0,      //
+    1479,   //
+    5191,   //
+    9244,   //
+    11314,  //
+    9570,   //
+    3468,   //
+    -5893,  //
+    -16000, //
+    -23671, //
+    -26096, //
+    -21815, //
+    -11314, //
+    3001,   //
+    17437,  //
+    28086   //
+};
+
+/**
+ * \brief Fast microphone AGC computation.
+ *
+ * Adjusts gain based on amplitude peaks to normalize audio levels, updating every 400 samples (25 ms at 16 kHz).
+ *
+ * \param[in,out] ctx Pointer to the polar_mod_ctx_t context.
+ * \param[in] ampl Current amplitude value.
+ * \param[in] polar_status Current polar status flags.
+ * \return Updated gain value (fixed-point, 256 = 1.0).
+ */
 static int mic_agc_fast(polar_mod_ctx_t *ctx, int ampl, uint32_t polar_status) {
-/*
- static int gain_value = 1000; // start value: gain=1, 8 bits after the comma, so 256 corresponds to a gain of 1.0
-    static int max_ampl = 0;
-    static int n = 0;
-    static int cnt_high_volume_peaks = 0;
-#ifdef DEBUG_PC2_AGC
-    static int cnt_high_volume_event = 0;
-#endif
-    static int cnt_low_volume_event = 0;
-    static int cnt_no_volume_event = 0;
-*/
     int flag_agc_active;
 
     flag_agc_active = ((polar_status & PTT_ACTIVE) || (polar_status & AGC_TRAINING)) && (!(polar_status & AGC_FROZEN)); // self explanatory, obviously
 
     if ((ampl > ctx->max_ampl) && flag_agc_active)
-         ctx->max_ampl = ampl; // find max peak amplitude
+        ctx->max_ampl = ampl; // find max peak amplitude
     if ((ampl > HIGH_VOL_THRES) && flag_agc_active)
-         ctx->cnt_high_volume_peaks++; // how often the max volume is exceeded?
+        ctx->cnt_high_volume_peaks++; // how often the max volume is exceeded?
 
-     ctx->n++;
+    ctx->n++;
 
     // every x samples (=25ms at 16kSps)
-    if ( ctx->n > 400) {
-         ctx->n = 0; // reset counter
+    if (ctx->n > 400) {
+        ctx->n = 0; // reset counter
 
-        if ( ctx->cnt_high_volume_peaks > 3)                                // more than 3 peaks happened ?
-             ctx->gain_value =  ctx->gain_value - ( ctx->gain_value >> STEP_DOWN_SIZE); // reduce gain
+        if (ctx->cnt_high_volume_peaks > 3)                                          // more than 3 peaks happened ?
+            ctx->gain_value = ctx->gain_value - (ctx->gain_value >> STEP_DOWN_SIZE); // reduce gain
 
-        if (( ctx->max_ampl < NO_VOL_THRES) && flag_agc_active)
-             ctx->cnt_no_volume_event++;
+        if ((ctx->max_ampl < NO_VOL_THRES) && flag_agc_active)
+            ctx->cnt_no_volume_event++;
         else
-             ctx->cnt_no_volume_event = 0;
+            ctx->cnt_no_volume_event = 0;
 
-        if (( ctx->max_ampl < LOW_VOL_THRES) && ( ctx->max_ampl > NO_VOL_THRES) && flag_agc_active)
-             ctx->cnt_low_volume_event++;
-        if (( ctx->max_ampl > LOW_VOL_THRES) && flag_agc_active)
-             ctx->cnt_low_volume_event = 0; // only a loud event resets counter // a "no sound" event does not
+        if ((ctx->max_ampl < LOW_VOL_THRES) && (ctx->max_ampl > NO_VOL_THRES) && flag_agc_active)
+            ctx->cnt_low_volume_event++;
+        if ((ctx->max_ampl > LOW_VOL_THRES) && flag_agc_active)
+            ctx->cnt_low_volume_event = 0; // only a loud event resets counter // a "no sound" event does not
 
-        if ( ctx->cnt_no_volume_event > 10)
-             ctx->cnt_low_volume_event = 10; // if there was quite some "no volume" in a row, then put back the low-volume counter to half the way, so it would not
-                                       // happen that "almost no sound" for a while pushes up the gain too much
+        if (ctx->cnt_no_volume_event > 10)
+            ctx->cnt_low_volume_event = 10; // if there was quite some "no volume" in a row, then put back the low-volume counter to half the way, so it would
+                                            // not happen that "almost no sound" for a while pushes up the gain too much
 
         // more than x times in a row , use quite some delay so a word not that loud does not immediately pushes up the gain
-        if ( ctx->cnt_low_volume_event > 20) {
-            ctx-> gain_value =  ctx->gain_value + ( ctx->gain_value >> STEP_UP_SIZE); // increase gain
+        if (ctx->cnt_low_volume_event > 20) {
+            ctx->gain_value = ctx->gain_value + (ctx->gain_value >> STEP_UP_SIZE); // increase gain
             polar_status |= AUDIO_LOW;
         } else {
             polar_status &= ~AUDIO_LOW; // Hmm... it's still quiet, even if the gain isn't increased!?
         }
 
         // more than 5 times in a row
-        if ( ctx->cnt_no_volume_event > 5) {
+        if (ctx->cnt_no_volume_event > 5) {
             polar_status |= AUDIO_SILENCE; // what else to do?
         } else {
             polar_status &= ~AUDIO_SILENCE; // what else to do?
         }
 
-        if ( ctx->gain_value < 64) {
-             ctx->gain_value = 64; // smallest gain value: 0.25 (64/256) // what else to do?
+        if (ctx->gain_value < 64) {
+            ctx->gain_value = 64; // smallest gain value: 0.25 (64/256) // what else to do?
         }
 
-        if ( ctx->gain_value > (1 << 15)) {
-             ctx->gain_value = 1 << 15; // highest gain value: 1<<5 (32) i.e. needs ca. 1/32 /ca. -30dB) of full swing for full scale // what else ?
+        if (ctx->gain_value > (1 << 15)) {
+            ctx->gain_value = 1 << 15; // highest gain value: 1<<5 (32) i.e. needs ca. 1/32 /ca. -30dB) of full swing for full scale // what else ?
         }
 
-         ctx->max_ampl = 0; // reset max value search
-         ctx->cnt_high_volume_peaks = 0;
+        ctx->max_ampl = 0; // reset max value search
+        ctx->cnt_high_volume_peaks = 0;
 
         // ADC gain (overdrive, underdrive too?): extra function? or converting AGC gain back to the ADC range. What about audio midlevel?
         // How can I display it properly?
     }
 
-    return  ctx->gain_value;
+    return ctx->gain_value;
 }
 
-// Soft limiter
+/**
+ * \brief Applies a soft limiter to the input signal.
+ *
+ * Limits the signal to prevent hard clipping, using a cubic approximation for smooth compression.
+ *
+ * \param[in] x Input signal value.
+ * \return Limited output value.
+ */
 static int soft_limiter(int x) {
 
     int x_sq; // x squared
@@ -141,15 +304,18 @@ static int soft_limiter(int x) {
     return data_out;
 }
 
-// Filter
-
-// calculate a biquad block / transposed direct form 2
-// 32 bit variables fix point, 16 bits after the decimal / 16 bits before the decimal
-// "delay" needs to be a pointer to a integer array with two entries for the delay stage of the block
-// TODO: when to use uint16_t, and where to use int ?!??! (does the CPU has a hardware 32x32->64bit mutliplier?!??)
-// maybe change fixpoint to: 10 bits after the decimal / 22 bits before the decimal
-// maybe change fixpoint to:  8 bits after the decimal / 24 bits before the decimal
-// or: stick with 16/16 and shift the 10bit ADC output by >>2
+/**
+ * \brief Computes a biquad filter stage (transposed direct form II).
+ *
+ * General biquad filter implementation for IIR filters with fixed coefficients.
+ *
+ * \param[in] x Input sample.
+ * \param[in] b1 b1 coefficient (fixed-point).
+ * \param[in] a1 a1 coefficient (fixed-point).
+ * \param[in] a2 a2 coefficient (fixed-point).
+ * \param[in,out] delay Pointer to delay array (2 elements).
+ * \return Filtered output.
+ */
 static int biquad(int x, int b1, int a1, int a2, int *delay) {
     int y;
     static const int64_t b0 = 1 << 16;
@@ -162,7 +328,18 @@ static int biquad(int x, int b1, int a1, int a2, int *delay) {
     return y;
 }
 
-// for 1pol highpass filters
+/**
+ * \brief Computes a biquad filter with b2=0 (for 1-pole filters).
+ *
+ * Specialized biquad for high-pass filters where b2 is zero.
+ *
+ * \param[in] x Input sample.
+ * \param[in] b1 b1 coefficient (fixed-point).
+ * \param[in] a1 a1 coefficient (fixed-point).
+ * \param[in] a2 a2 coefficient (fixed-point).
+ * \param[in,out] delay Pointer to delay array (2 elements).
+ * \return Filtered output.
+ */
 static int biquad_b2zero(int x, int b1, int a1, int a2, int *delay) {
     int y;
     static const int64_t b0 = 1 << 16;
@@ -174,16 +351,15 @@ static int biquad_b2zero(int x, int b1, int a1, int a2, int *delay) {
     return y;
 }
 
-// TODO:
-// The filter works so far. However, the low-pass filter has limit cycles (albeit only a few LSBs), and the high-pass filter has a final value of -172. That's
-// only a small DC offset, but it's one...
-
-// Octave Coefficients for a 2 pole Bessel lowpass filter, Fc=3000Hz at 16kHz sample rate
-// format=[b0       b1          b2        1          a1         a2]
-// sos_tp_2p_3000_bessel =
-//    1.00000   2.00000   1.00000   1.00000  -0.42518   0.11105
-// g_tp_2p_3000_bessel =  0.17147
-// "delay" is a integer array with 2 places and allows to use the filter function in different locations
+/**
+ * \brief 2-pole Bessel low-pass filter at 3000 Hz (16 kHz sample rate).
+ *
+ * Implements a 2-pole low-pass filter using biquad with Bessel coefficients.
+ *
+ * \param[in] x Input sample.
+ * \param[in,out] delay Pointer to delay array (2 elements).
+ * \return Filtered output.
+ */
 static int filter_2pol_lowpass_3000hz_bessel(int x, int *delay) {
     int stage1;
     // int stage2;
@@ -194,13 +370,15 @@ static int filter_2pol_lowpass_3000hz_bessel(int x, int *delay) {
     return stage1;
 }
 
-// Octave Coefficients for a 4 pole Butterworth lowpass filter, Fc=3400Hz at 16kHz sample rate
-// format=[b0       b1          b2        1          a1         a2]
-// sos_tp_4p_3000_bessel =
-//   1.000000   2.000000   1.000000   1.000000  -0.419938   0.261585
-//   1.000000   2.000000   1.000000   1.000000  -0.461594   0.072549
-// g_tp_4p_3000_bessel =  0.032138
-// "delay" is a integer array with 4 places and allows to use the filter function in different locations
+/**
+ * \brief 4-pole Bessel low-pass filter at 3000 Hz (16 kHz sample rate).
+ *
+ * Implements a 4-pole low-pass filter using two cascaded biquads with Bessel coefficients.
+ *
+ * \param[in] x Input sample.
+ * \param[in,out] delay Pointer to delay array (4 elements).
+ * \return Filtered output.
+ */
 static int filter_4pol_lowpass_3000hz_bessel(int x, int *delay) {
     int stage1;
     int stage2;
@@ -212,13 +390,15 @@ static int filter_4pol_lowpass_3000hz_bessel(int x, int *delay) {
     return stage2;
 }
 
-// Octave Coefficients for a 4 pole Butterworth lowpass filter, Fc=3400Hz at 16kHz sample rate
-// format=[b0       b1          b2        1          a1         a2]
-// sos_tp_4p_3000 =
-//   1.000000   2.000000   1.000000   1.000000  -0.412919   0.079009
-//   1.000000   2.000000   1.000000   1.000000  -0.565450   0.477592
-// g_tp_4p_3000 =  0.037973
-// "delay" is a integer array with 4 places and allows to use the filter function in different locations
+/**
+ * \brief 4-pole Butterworth low-pass filter at 3000 Hz (16 kHz sample rate).
+ *
+ * Implements a 4-pole low-pass filter using two cascaded biquads with Butterworth coefficients.
+ *
+ * \param[in] x Input sample.
+ * \param[in,out] delay Pointer to delay array (4 elements).
+ * \return Filtered output.
+ */
 static int filter_4pol_lowpass_3000hz(int x, int *delay) {
     int stage1;
     int stage2;
@@ -230,13 +410,15 @@ static int filter_4pol_lowpass_3000hz(int x, int *delay) {
     return stage2;
 }
 
-// Octave Coefficients for a 4 pole Butterworth lowpass filter, Fc=3400Hz at 16kHz sample rate
-// format=[b0       b1          b2        1          a1         a2]
-// sos =
-//   1.000000   2.000000   1.000000   1.000000  -0.245945   0.053545
-//   1.000000   2.000000   1.000000   1.000000  -0.340272   0.457609
-// g =  0.056398
-// "delay" is a integer array with 4 places and allows to use the filter function in different locations
+/**
+ * \brief 4-pole Butterworth low-pass filter at 3400 Hz (16 kHz sample rate).
+ *
+ * Implements a 4-pole low-pass filter using two cascaded biquads with Butterworth coefficients.
+ *
+ * \param[in] x Input sample.
+ * \param[in,out] delay Pointer to delay array (4 elements).
+ * \return Filtered output.
+ */
 static int filter_4pol_lowpass_3400hz(int x, int *delay) {
     int stage1;
     int stage2;
@@ -249,12 +431,15 @@ static int filter_4pol_lowpass_3400hz(int x, int *delay) {
     return stage2;
 }
 
-// Octave Coefficients for a 2 pole Butterworth lowpass filter, Fc=3400Hz at 16kHz sample rate
-// format=[b0       b1          b2        1          a1         a2]
-// sos_tp_2p_3400 =
-//   1.00000   2.00000   1.00000   1.00000  -0.27666   0.18514
-// g_tp_2p_3400 =  0.22712
-// "delay" is a integer array with 2 places and allows to use the filter function in different locations
+/**
+ * \brief 2-pole Butterworth low-pass filter at 3400 Hz (16 kHz sample rate).
+ *
+ * Implements a 2-pole low-pass filter using biquad with Butterworth coefficients.
+ *
+ * \param[in] x Input sample.
+ * \param[in,out] delay Pointer to delay array (2 elements).
+ * \return Filtered output.
+ */
 static int filter_2pol_lowpass_3400hz(int x, int *delay) {
     int stage1;
 
@@ -264,18 +449,17 @@ static int filter_2pol_lowpass_3400hz(int x, int *delay) {
     return stage1;
 }
 
-// Octave Coefficients for a 1 pole Butterworth highpass filter, Fc=500Hz at 16kHz sample rate
-// format=[b0       b1          b2        1          a1         a2]
-// sos_hp_1p_500 =
-//         1.00000  -1.00000   0.00000   1.00000  -0.82068   0.00000
-// g_hp_1p_500 =  0.91034
+/**
+ * \brief 1-pole Butterworth high-pass filter at 500 Hz (16 kHz sample rate).
+ *
+ * Implements a 1-pole high-pass filter using specialized biquad.
+ *
+ * \param[in,out] ctx Pointer to context for delays.
+ * \param[in] x Input sample.
+ * \return Filtered output.
+ */
 static int filter_1pol_highpass_500hz(polar_mod_ctx_t *ctx, int x) {
     int stage1;
-    // int stage2;
-    //static int delay_s1[2] = {
-    //    0, //
-    //    0  //
-    //};
 
     stage1 = biquad_b2zero(x, -(1 << 16), -53784, 0, ctx->delay_s1); // b1,a1,a2
 
@@ -284,14 +468,18 @@ static int filter_1pol_highpass_500hz(polar_mod_ctx_t *ctx, int x) {
     return stage1;
 }
 
-// Octave Coefficients for a 1 pole Butterworth highpass filter, Fc=1000Hz at 16kHz sample rate
-// format=[b0       b1          b2        1          a1         a2]
-// sos_hp_1p_1000 =
-//        1.00000  -1.00000   0.00000   1.00000  -0.66818   0.00000
-// g_hp_1p_1000 =  0.83409
+/**
+ * \brief 1-pole Butterworth high-pass filter at 1000 Hz (16 kHz sample rate).
+ *
+ * Implements a 1-pole high-pass filter using specialized biquad.
+ *
+ * \param[in,out] ctx Pointer to context for delays.
+ * \param[in] x Input sample.
+ * \return Filtered output.
+ */
 static int filter_1pol_highpass_1000hz(polar_mod_ctx_t *ctx, int x) {
     int stage1;
-    //static int delay_s1[2] = { 0, 0 };
+    // static int delay_s1[2] = { 0, 0 };
 
     stage1 = biquad_b2zero(x, -(1 << 16), -43790, 0, ctx->delay_s1); // b1,a1,a2
     // ignore g here, as it is close to one
@@ -299,14 +487,17 @@ static int filter_1pol_highpass_1000hz(polar_mod_ctx_t *ctx, int x) {
     return stage1;
 }
 
-// Octave Coefficients for a 1 pole Butterworth highpass filter, Fc=2000Hz at 16kHz sample rate
-// format=[b0       b1          b2        1          a1         a2]
-// sos_hp_1p_2000 =
-//       1.00000  -1.00000   0.00000   1.00000  -0.41421   0.00000
-// g_hp_1p_2000 =  0.70711
+/**
+ * \brief 1-pole Butterworth high-pass filter at 2000 Hz (16 kHz sample rate).
+ *
+ * Implements a 1-pole high-pass filter using specialized biquad.
+ *
+ * \param[in,out] ctx Pointer to context for delays.
+ * \param[in] x Input sample.
+ * \return Filtered output.
+ */
 static int filter_1pol_highpass_2000hz(polar_mod_ctx_t *ctx, int x) {
     int stage1;
-   // static int delay_s1[2] = { 0, 0 };
 
     stage1 = biquad_b2zero(x, -(1 << 16), -27146, 0, ctx->delay_s1); // b1,a1,a2
     // ignore g here, as it is close to one
@@ -314,17 +505,18 @@ static int filter_1pol_highpass_2000hz(polar_mod_ctx_t *ctx, int x) {
     return stage1;
 }
 
-// Octave Coefficients for a 4 pole Butterworth highpass filter, Fc=200Hz at 16kHz sample rate
-// format=[b0       b1          b2        1          a1         a2]
-// sos =
-//        1.00000  -2.00000   1.00000   1.00000  -1.85908   0.86482
-//        1.00000  -2.00000   1.00000   1.00000  -1.93571   0.94170
-// g =  0.90244
+/**
+ * \brief 4-pole Butterworth high-pass filter at 200 Hz (16 kHz sample rate).
+ *
+ * Implements a 4-pole high-pass filter using two cascaded biquads, with DC offset correction.
+ *
+ * \param[in,out] ctx Pointer to context for delays.
+ * \param[in] x Input sample.
+ * \return Filtered output.
+ */
 static int filter_4pol_highpass_200hz(polar_mod_ctx_t *ctx, int x) {
     int stage1;
     int stage2;
-    //static int delay_s1[2] = { 0, 0 };
-    //static int delay_s2[2] = { 0, 0 };
 
     stage1 = biquad(x, -(2 << 16), -121837, 56677, ctx->delay_s1);      // b1,a1,a2
     stage2 = biquad(stage1, -(2 << 16), -126859, 61715, ctx->delay_s2); // b1,a1,a2
@@ -333,17 +525,18 @@ static int filter_4pol_highpass_200hz(polar_mod_ctx_t *ctx, int x) {
     return stage2;
 }
 
-// Octave Coefficients for a 4 pole Butterworth highpass filter, Fc=300Hz at 16kHz sample rate
-// format=[b0       b1          b2        1          a1         a2]
-// sos_hp_4p_300 =
-//        1.00000  -2.00000   1.00000   1.00000  -1.79159   0.80409
-//        1.00000  -2.00000   1.00000   1.00000  -1.90065   0.91391
-// g_hp_4p_300 =  0.85725
+/**
+ * \brief 4-pole Butterworth high-pass filter at 300 Hz (16 kHz sample rate).
+ *
+ * Implements a 4-pole high-pass filter using two cascaded biquads, with DC offset correction.
+ *
+ * \param[in,out] ctx Pointer to context for delays.
+ * \param[in] x Input sample.
+ * \return Filtered output.
+ */
 static int filter_4pol_highpass_300hz(polar_mod_ctx_t *ctx, int x) {
     int stage1;
     int stage2;
-   // static int delay_s1[2] = { 0, 0 };
-   // static int delay_s2[2] = { 0, 0 };
 
     stage1 = biquad(x, -(2 << 16), -117414, 52697, ctx->delay_s1);      // b1,a1,a2
     stage2 = biquad(stage1, -(2 << 16), -124561, 59894, ctx->delay_s2); // b1,a1,a2
@@ -352,15 +545,17 @@ static int filter_4pol_highpass_300hz(polar_mod_ctx_t *ctx, int x) {
     return stage2;
 }
 
-// Octave Coefficients for a 2 pole Butterworth highpass filter, Fc=300Hz at 16kHz sample rate
-// format=[b0       b1          b2        1          a1         a2]
-// sos_hp_2p_300 =
-//         1.00000  -2.00000   1.00000   1.00000  -1.83373   0.84653
-// g_hp_2p_300 =  0.92007
+/**
+ * \brief 2-pole Butterworth high-pass filter at 300 Hz (16 kHz sample rate).
+ *
+ * Implements a 2-pole high-pass filter using biquad, with DC offset correction.
+ *
+ * \param[in,out] ctx Pointer to context for delays.
+ * \param[in] x Input sample.
+ * \return Filtered output.
+ */
 static int filter_2pol_highpass_300hz(polar_mod_ctx_t *ctx, int x) {
     int stage1;
-    // int stage2;
-    //static int delay_s1[2] = { 0, 0 };
 
     stage1 = biquad(x, -(2 << 16), -120175, 55478, ctx->delay_s1); // b1,a1,a2
     // ignore g here, as it is close to one
@@ -368,13 +563,16 @@ static int filter_2pol_highpass_300hz(polar_mod_ctx_t *ctx, int x) {
     return stage1;
 }
 
-// Hilbert
-// TODO: produces a peak at fs/2, so maybe it has "Grenzzyklen"??!?!??!
-
-// calculates an allpass for the hilbert transform
-// allplass block according to the picture here: https://www.mikrocontroller.net/topic/480404#7103779
-// delay : 2-stage delay storage
-// coeff : coefficient (16 bits before the decimal, 16 bits after the decimal)
+/**
+ * \brief Computes an all-pass filter stage for Hilbert transform.
+ *
+ * All-pass filter used in the Hilbert transform chain.
+ *
+ * \param[in] x Input sample.
+ * \param[in] coeff Fixed-point coefficient.
+ * \param[in,out] delay Pointer to delay array (2 elements).
+ * \return Filtered output.
+ */
 static int allpass(int x, int coeff, int *delay) {
     int signal_top_right;
     int y;
@@ -387,30 +585,24 @@ static int allpass(int x, int coeff, int *delay) {
     return y;
 }
 
-// Hilbert tranformation for microcontroller according to: https://www.mikrocontroller.net/topic/480404#7103779
-// coefficients according to:
-// https://www.mikrocontroller.net/topic/92630#839661  (https://www.mikrocontroller.net/attachment/33904/hilbert_Olli_Niemitalo.pdf )
-// https://web.archive.org/web/20070814013543/
-// http://yehar.com/ViewHome.pl?page=dsp/hilbert/011729.html
+/**
+ * \brief Performs Hilbert transform to generate I and Q components.
+ *
+ * Uses cascaded all-pass filters to create in-phase (I) and quadrature (Q) signals from input.
+ *
+ * \param[in,out] ctx Pointer to context for delays.
+ * \param[in] sample_in Input sample.
+ * \param[out] i_out Pointer to in-phase output.
+ * \param[out] q_out Pointer to quadrature output.
+ */
 static void hilbert(polar_mod_ctx_t *ctx, int sample_in, int *i_out, int *q_out) {
     int i1, i2, i3, q1, q2, q3;
-    /* delay storage
-    static int delay_i0 = 0;           // inphase Z^-1 block
-    static int delay_i1[2] = { 0, 0 }; // inphase 1. block
-    static int delay_i2[2] = { 0, 0 }; // inphase 2. block
-    static int delay_i3[2] = { 0, 0 }; // inphase 3. block
-    static int delay_i4[2] = { 0, 0 }; // inphase 4. block
-    static int delay_q1[2] = { 0, 0 }; // quadrature 1.block
-    static int delay_q2[2] = { 0, 0 }; // quadrature 2.block
-    static int delay_q3[2] = { 0, 0 }; // quadrature 3.block
-    static int delay_q4[2] = { 0, 0 }; // quadrature 4.block
-*/
 
     // inphase 1. to 4. Block
     i1 = allpass(ctx->delay_i0, 31418, ctx->delay_i1); // coeff = ( ( 0.6923877778065 ) ^ 2 ) << 16
-    i2 = allpass(i1, 57434, ctx->delay_i2);       // coeff = ( ( 0.9360654322959 ) ^ 2 ) << 16
-    i3 = allpass(i2, 64002, ctx->delay_i3);       // coeff = ( ( 0.9882295226860 ) ^ 2 ) << 16
-    *i_out = allpass(i3, 65372, ctx->delay_i4);   // coeff = ( ( 0.9987488452737 ) ^ 2 ) << 16
+    i2 = allpass(i1, 57434, ctx->delay_i2);            // coeff = ( ( 0.9360654322959 ) ^ 2 ) << 16
+    i3 = allpass(i2, 64002, ctx->delay_i3);            // coeff = ( ( 0.9882295226860 ) ^ 2 ) << 16
+    *i_out = allpass(i3, 65372, ctx->delay_i4);        // coeff = ( ( 0.9987488452737 ) ^ 2 ) << 16
     // inphase Z^-1 block
     ctx->delay_i0 = sample_in;
 
@@ -421,16 +613,27 @@ static void hilbert(polar_mod_ctx_t *ctx, int sample_in, int *i_out, int *q_out)
     *q_out = allpass(q3, 64920, ctx->delay_q4);    // coeff = ( ( 0.9952884791278 ) ^ 2 ) << 16
 }
 
-// Cordic
-
-#define CORDIC_ITERATIONS 8
-
-// cordic algorithm according to: https://www.eit.lth.se/fileadmin/eit/courses/eitf35/2017/CORDIC_For_Dummies.pdf (mainly page 6)
-// the absolute value is calculated with integer numbers, so scale appropriate to get enough resolution
+/**
+ * \brief Computes magnitude and angle using CORDIC algorithm.
+ *
+ * Rotates the vector to compute absolute value and phase angle in fixed-point.
+ *
+ * \param[in] x X coordinate (I).
+ * \param[in] y Y coordinate (Q).
+ * \param[out] out_abs Pointer to magnitude output.
+ * \param[out] out_angle Pointer to angle output (scaled: 2^24 = 360 degrees).
+ */
 static void cordic(int x, int y, int *out_abs, int *out_angle) {
-    // AngTable in degrees =                        45   , 26.565,14.036, 7.125, 3.576,1.790,0.895,0.448
+    // AngTable in degrees = 45, 26.565,14.036, 7.125, 3.576,1.790,0.895,0.448
     static const int angtable[CORDIC_ITERATIONS] = {
-        2097152, 1238019, 654125, 332049, 166654, 83420, 41710, 20878
+        2097152, //
+        1238019, //
+        654125,  //
+        332049,  //
+        166654,  //
+        83420,   //
+        41710,   //
+        20878    //
     }; // 2^24=16777216 corresponds to 360° / 46603 -> 1°  / 20878 -> 0.448° (last step)
     int loopnum;
     int x_new, y_new, sumangle;
@@ -478,157 +681,17 @@ static void cordic(int x, int y, int *out_abs, int *out_angle) {
     return;
 }
 
-// IQ test signal generator
-
-#define LOOKUP_SIZE 32
-// gen_2_tone_iq_2.m : 3 Tone signal Amplitudes: 1600/16000/16000  (500/1000/1500Hz). Range ca. -32000...+32000 / min amplitude ca. 1600 (=-20dB)
-static int table_3_tone_x[LOOKUP_SIZE] = {
-    0,      //
-    14700,  //
-    25483,  //
-    29586,  //
-    26182,  //
-    16573,  //
-    3713,   //
-    -8750,  //
-    -17600, //
-    -20996, //
-    -18915, //
-    -12991, //
-    -5818,  //
-    22,     //
-    2856,   //
-    2454,   //
-    0,      //
-    -2454,  //
-    -2856,  //
-    -22,    //
-    5818,   //
-    12991,  //
-    18915,  //
-    20996,  //
-    17600,  //
-    8750,   //
-    -3713,  //
-    -16573, //
-    -26182, //
-    -29586, //
-    -25483, //
-    -14700  //
-};
-
-static int table_3_tone_y[LOOKUP_SIZE] = {
-    30400,  //
-    26516,  //
-    15958,  //
-    1671,   //
-    -12445, //
-    -22704, //
-    -26708, //
-    -23983, //
-    -16000, //
-    -5581,  //
-    4081,   //
-    10459,  //
-    12445,  //
-    10575,  //
-    6669,   //
-    3048,   //
-    1600,   //
-    3048,   //
-    6669,   //
-    10575,  //
-    12445,  //
-    10459,  //
-    4081,   //
-    -5581,  //
-    -16000, //
-    -23983, //
-    -26708, //
-    -22704, //
-    -12445, //
-    1671,   //
-    15958,  //
-    26516   //
-};
-
-// gen_2_tone_iq_2.m : 3 Tone signal Amplitudes: 0/16000/16000  (500/1000/1500Hz). Range ca. -32000...+32000 / min amplitude 0
-static int table_2_tone_x[LOOKUP_SIZE] = {
-    0,      //
-    15012,  //
-    26096,  //
-    30475,  //
-    27314,  //
-    17904,  //
-    5191,   //
-    -7181,  //
-    -16000, //
-    -19426, //
-    -17437, //
-    -11661, //
-    -4686,  //
-    910,    //
-    3468,   //
-    2766,   //
-    0,      //
-    -2766,  //
-    -3468,  //
-    -910,   //
-    4686,   //
-    11661,  //
-    17437,  //
-    19426,  //
-    16000,  //
-    7181,   //
-    -5191,  //
-    -17904, //
-    -27314, //
-    -30475, //
-    -26096, //
-    -15012  //
-};
-
-static int table_2_tone_y[LOOKUP_SIZE] = {
-    32000,  //
-    28086,  //
-    17437,  //
-    3001,   //
-    -11314, //
-    -21815, //
-    -26096, //
-    -23671, //
-    -16000, //
-    -5893,  //
-    3468,   //
-    9570,   //
-    11314,  //
-    9244,   //
-    5191,   //
-    1479,   //
-    0,      //
-    1479,   //
-    5191,   //
-    9244,   //
-    11314,  //
-    9570,   //
-    3468,   //
-    -5893,  //
-    -16000, //
-    -23671, //
-    -26096, //
-    -21815, //
-    -11314, //
-    3001,   //
-    17437,  //
-    28086   //
-};
-
-// all frequency values rely on 16kSps
-// not in the .h file: only used internally
+/**
+ * \brief Generates IQ test signals using lookup tables.
+ *
+ * Cycles through precomputed tables for 2-tone or 3-tone signals based on mode.
+ *
+ * \param[in,out] ctx Pointer to context for state.
+ * \param[in] mode Special modulation mode for signal type.
+ * \param[out] x Pointer to X (I) output.
+ * \param[out] y Pointer to Y (Q) output.
+ */
 static void iq_signal_generator(polar_mod_ctx_t *ctx, int mode, int *x, int *y) {
-    //static unsigned int last_mode = 555; // dummy value
-    //static unsigned int counter = 0;
-
     // reset counter when mode changes
     if (ctx->last_mode != mode) {
         ctx->last_mode = mode;
@@ -651,52 +714,19 @@ static void iq_signal_generator(polar_mod_ctx_t *ctx, int mode, int *x, int *y) 
     }
 }
 
-// Main data processing
-// each call of this function puts a new ADC sample from the microphone in
-// generates SSB USB (single side band - upper side band) with polar output (amplitude/phase)
-// data: audio data input
-// ampl_out: linear amplitude output. TODO: give gain of amplitude between in and out
-// phase_diff_out: phase difference to last phase. Value of 2^24 = 16777216 corresponds to 360°. Output range: -180...+180°  or -90°...+90° ?!??!
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
 int modulation_am_pm(polar_mod_ctx_t *ctx, modulation_t modulation, int data, int *ampl_out, int *phase_diff_out) {
     if (!ampl_out || !phase_diff_out)
         return -1;
 
-/*
-    // each filter needs its private storage to be able to reuse the function
-    static int delay_lp_adc[4] = {
-        0, //
-        0, //
-        0, //
-        0  //
-    };
-    static int delay_lp_2[4] = {
-        0, //
-        0, //
-        0, //
-        0  //
-    };
-    static int delay_lp_x[4] = {
-        0, //
-        0, //
-        0, //
-        0  //
-    };
-    static int delay_lp_y[4] = {
-        0, //
-        0, //
-        0, //
-        0  //
-    };
-    static int agc_gain = 256; // needs to be remembered from last call, start value is a dummy, just for the first audio sample
-*/
     int data_2, data_3, data_4, data_5;
     int x, y;
     int ampl;
     int angle;
     int angle_diff = 0;
-   // static int last_angle;
 
-    // highpass, also removes DC bias
+    // high pass, also removes DC bias
     switch (modulation.filter_pre_hp) {
         case FILTER_HP_200_4pol:
             data_2 = filter_4pol_highpass_200hz(ctx, data); // highpass is only called once, so the storage of the state can be internal
@@ -828,14 +858,14 @@ int modulation_am_pm(polar_mod_ctx_t *ctx, modulation_t modulation, int data, in
         case MOD_LSB:
         case MOD_USB:
             angle_diff = (angle - ctx->last_angle); // value of 2^24 = 16777216 corresponds to 360°  // range: -180...+180°
-            if (angle_diff > 0x800000)         // > 180°?
-                angle_diff -= 0x1000000;       // 180°...360° -> -180..0°  (unwrap)
-            if (angle_diff < -0x800000)        // < -180°?
-                angle_diff += 0x1000000;       // -360°...-180° -> 0..180°  (unwrap)
-                                               // if (angle_diff >  0x400000) > 90°?
-                                               //      angle_diff =  0x400000; // set to 90°. Limit Delta-f to 4kHz (at sample rate of 16KHz)
-                                               //      if (angle_diff < -0x400000) < -90°?
-                                               //          angle_diff = -0x400000; // set to -90°. Limit Delta-f to 4kHz (at sample rate of 16KHz)
+            if (angle_diff > 0x800000)              // > 180°?
+                angle_diff -= 0x1000000;            // 180°...360° -> -180..0°  (unwrap)
+            if (angle_diff < -0x800000)             // < -180°?
+                angle_diff += 0x1000000;            // -360°...-180° -> 0..180°  (unwrap)
+                                                    // if (angle_diff >  0x400000) > 90°?
+                                                    //      angle_diff =  0x400000; // set to 90°. Limit Delta-f to 4kHz (at sample rate of 16KHz)
+                                                    //      if (angle_diff < -0x400000) < -90°?
+                                                    //          angle_diff = -0x400000; // set to -90°. Limit Delta-f to 4kHz (at sample rate of 16KHz)
 
             if (angle_diff > 0x600000)  // > 135°?
                 angle_diff = 0x600000;  // set to 135°. Limit Delta-f to 6kHz (at sample rate of 16KHz)
