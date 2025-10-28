@@ -1,14 +1,14 @@
-# ESP32 FM Transmitter
+# ESP32 Transmitter
 
 ## Overview
 
-This project transforms an ESP32 microcontroller into a basic FM radio transmitter by leveraging its internal hardware components. It generates a carrier frequency in the FM band and modulates it with audio data to broadcast signals that can be received by standard FM radios. The implementation focuses on using the Audio Phase-Locked Loop (APLL) for precise frequency control and the Inter-IC Sound (I2S) peripheral to output the modulated signal. Audio modulation is handled through a polar coordinate-based approach, allowing for efficient amplitude and phase adjustments.
+This project transforms an ESP32 microcontroller into a basic radio transmitter by leveraging its internal hardware components. It generates a carrier and modulates it with audio data to broadcast signals that can be received by standard FM radios. The implementation focuses on using the Audio Phase-Locked Loop (APLL) for precise frequency control and the Inter-IC Sound (I2S) peripheral to output the modulated signal. Audio modulation is handled through a polar coordinate-based approach, allowing for efficient amplitude and phase adjustments.
 
 The transmitter operates at low power, making it suitable for short-range demonstrations or experiments. It includes support for various modulation modes, filters, and automatic gain control (AGC) to process input signals. Note that this is an educational and experimental tool; users should comply with local regulations regarding radio transmissions to avoid interference.
 
 ## Features
 
-- Generates FM carrier frequencies between approximately 76 MHz and 125 MHz.
+- Generates carrier frequencies between approximately 76 MHz and 125 MHz.
 - Supports frequency modulation with configurable deviation (e.g., up to 75 kHz for wide FM).
 - Includes embedded audio playback for testing, with looping capability.
 - Configurable modulation types, including narrow FM, wide FM, AM, SSB, and test signals.
